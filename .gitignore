@@ -1,0 +1,10 @@
+# 真实配置（含 API 密钥 / bot token），绝不提交
+config.json
+
+# 运行时数据
+data/
+server.log
+*.log
+
+.DS_Store
+node_modules/

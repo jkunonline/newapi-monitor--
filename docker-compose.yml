@@ -1,0 +1,14 @@
+services:
+  newapi-monitor:
+    build: .
+    container_name: newapi-monitor
+    restart: unless-stopped
+    ports:
+      # 只绑定服务器本机，通过 nginx 反代或 SSH 隧道访问；
+      # 若要直接公网访问改成 "8788:8788"（注意状态页无鉴权）
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+    environment:
+      - HOST=0.0.0.0

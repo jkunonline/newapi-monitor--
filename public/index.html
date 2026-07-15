@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NewAPI 模型监控</title>
+<style>
+  :root {
+    --bg: #0f1419; --card: #171e26; --border: #232d38;
+    --text: #e6edf3; --muted: #8b98a5;
+    --ok: #3fb950; --err: #f85149; --warn: #d29922; --skip: #4b5563;
+    --accent: #1f6feb;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+
+  .overview { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 18px; min-width: 100px; }
+  .stat .v { font-size: 22px; font-weight: 600; }
+  .stat .l { color: var(--muted); font-size: 12px; }
+  .stat.ok .v { color: var(--ok); } .stat.err .v { color: var(--err); } .stat.skip .v { color: var(--muted); }
+
+  /* API 标签页 */
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tab { background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 16px; cursor: pointer; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px; user-select: none; transition: border-color .15s; }
+  .tab:hover { border-color: #3b5266; }
+  .tab.active { border-color: var(--accent); background: #14263f; }
+  .tab .cnt { color: var(--muted); font-size: 12px; }
+  .tab .mini { width: 8px; height: 8px; border-radius: 50%; }
+  .tab .mini.ok { background: var(--ok); } .tab .mini.err { background: var(--err); } .tab .mini.na { background: var(--skip); }
+
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
+  input[type=search] { flex: 1; min-width: 180px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 12px; outline: none; }
+  input[type=search]:focus { border-color: var(--accent); }
+  button { background: var(--accent); border: 0; color: #fff; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .model { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin-bottom: 8px; }
+  .row1 { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .dot.ok { background: var(--ok); } .dot.error { background: var(--err); }
+  .dot.timeout { background: var(--warn); } .dot.skip, .dot.none { background: var(--skip); }
+  .name { font-weight: 600; word-break: break-all; }
+  .apitag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; flex: none; }
+  .meta { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; display: flex; gap: 12px; }
+  .meta .lat.fast { color: var(--ok); } .meta .lat.slow { color: var(--warn); }
+  .rate.good { color: var(--ok); } .rate.bad { color: var(--err); } .rate.mid { color: var(--warn); }
+
+  .bar { display: flex; gap: 2px; margin-top: 8px; }
+  .cell { flex: 1; height: 16px; max-width: 10px; border-radius: 2px; background: #2a3540; cursor: default; }
+  .cell.ok { background: var(--ok); } .cell.error { background: var(--err); } .cell.timeout { background: var(--warn); }
+
+  .errline { margin-top: 6px; color: var(--err); font-size: 12px; word-break: break-all; }
+  .badge { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; }
+  .gone { opacity: .5; }
+  .empty { color: var(--muted); text-align: center; padding: 48px 0; }
+
+  #tooltip { position: fixed; background: #000c; color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 6px; pointer-events: none; display: none; max-width: 320px; z-index: 10; word-break: break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">模型监控</h1>
+  <div class="sub" id="subline">加载中…</div>
+
+  <div class="overview" id="overview"></div>
+
+  <div class="tabs" id="tabs"></div>
+
+  <div class="toolbar">
+    <input type="search" id="filter" placeholder="搜索模型名…">
+    <button id="probeBtn" onclick="triggerProbe()">立即探测</button>
+  </div>
+
+  <div id="list"><div class="empty">加载中…</div></div>
+</div>
+<div id="tooltip"></div>
+
+<script>
+let data = null;
+let activeApi = ''; // '' = 全部
+
+function fmtTime(t) { return t ? new Date(t).toLocaleString() : '—'; }
+function fmtAgo(t) {
+  if (!t) return '—';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return s + ' 秒前';
+  if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+  return Math.round(s / 3600) + ' 小时前';
+}
+function fmtIn(t) {
+  if (!t) return '—';
+  const s = Math.round((t - Date.now()) / 1000);
+  if (s <= 0) return '即将开始';
+  if (s < 60) return s + ' 秒后';
+  return Math.round(s / 60) + ' 分钟后';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function visibleModels() {
+  if (!data) return [];
+  return data.models.filter(m => m.present !== false || (m.history && m.history.length));
+}
+
+function apiStats(models, api) {
+  const group = models.filter(m => m.api === api);
+  const probed = group.filter(m => !m.excluded);
+  return {
+    total: group.length,
+    ok: probed.filter(m => m.last && m.last.status === 'ok').length,
+    err: probed.filter(m => m.last && m.last.status !== 'ok').length,
+  };
+}
+
+function renderTabs() {
+  const models = visibleModels();
+  const apis = data.apis || [];
+  const el = document.getElementById('tabs');
+  if (apis.length <= 1) { el.style.display = 'none'; return; }
+  el.style.display = '';
+
+  const tab = (id, label, stats) => {
+    const mini = stats == null ? '' :
+      `<span class="mini ${stats.err ? 'err' : (stats.ok ? 'ok' : 'na')}"></span>`;
+    const cnt = stats == null ? '' :
+      `<span class="cnt">${stats.ok}/${stats.ok + stats.err}${stats.err ? ' · ' + stats.err + '异常' : ''}</span>`;
+    return `<div class="tab ${activeApi === id ? 'active' : ''}" data-api="${escapeHtml(id)}">${mini}${escapeHtml(label)}${cnt}</div>`;
+  };
+
+  let html = tab('', '全部', null);
+  for (const a of apis) html += tab(a, a, apiStats(models, a));
+  el.innerHTML = html;
+
+  el.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      activeApi = t.dataset.api;
+      renderTabs();
+      renderList();
+    });
+  });
+}
+
+function modelCard(m, showApiTag) {
+  const st = m.excluded ? 'skip' : (m.last ? m.last.status : 'none');
+  const lat = m.last && m.last.status === 'ok' ? m.last.latency_ms : null;
+  const latCls = lat == null ? '' : (lat < 3000 ? 'fast' : 'slow');
+  const rate = m.ok_rate_24h;
+  const rateCls = rate == null ? '' : rate >= 0.99 ? 'good' : rate >= 0.9 ? 'mid' : 'bad';
+  const cells = (m.history || []).map(h =>
+    `<div class="cell ${h.status}" data-tip="${fmtTime(h.t)} · ${h.status}${h.latency_ms ? ' · ' + h.latency_ms + 'ms' : ''}${h.error ? ' · ' + escapeHtml(h.error) : ''}"></div>`
+  ).join('');
+  const lastErr = !m.excluded && m.last && m.last.status !== 'ok'
+    ? `<div class="errline">${m.last.http_status ? 'HTTP ' + m.last.http_status + ' · ' : ''}${escapeHtml(m.last.error || m.last.status)}</div>` : '';
+  return `<div class="model ${m.present === false ? 'gone' : ''}">
+    <div class="row1">
+      <div class="dot ${st}"></div>
+      <div class="name">${escapeHtml(m.name)}</div>
+      ${showApiTag ? `<span class="apitag">${escapeHtml(m.api)}</span>` : ''}
+      ${m.excluded ? '<span class="badge">未探测</span>' : ''}
+      ${m.present === false ? '<span class="badge">已下线</span>' : ''}
+      <div class="meta">
+        ${lat != null ? `<span class="lat ${latCls}">${lat}ms</span>` : ''}
+        ${rate != null ? `<span class="rate ${rateCls}">24h ${(rate * 100).toFixed(1)}%</span>` : ''}
+      </div>
+    </div>
+    ${m.excluded ? '' : `<div class="bar">${cells}</div>`}
+    ${lastErr}
+  </div>`;
+}
+
+function renderList() {
+  const models = visibleModels();
+  const q = document.getElementById('filter').value.trim().toLowerCase();
+  const shown = models.filter(m =>
+    (!q || m.name.toLowerCase().includes(q)) && (!activeApi || m.api === activeApi));
+
+  const badRank = m => m.excluded ? 2 : (m.last && m.last.status !== 'ok' ? 0 : 1);
+  shown.sort((a, b) => badRank(a) - badRank(b) || a.name.localeCompare(b.name) || a.api.localeCompare(b.api));
+
+  const list = document.getElementById('list');
+  if (!shown.length) { list.innerHTML = '<div class="empty">没有匹配的模型</div>'; return; }
+  const showApiTag = !activeApi && (data.apis || []).length > 1;
+  list.innerHTML = shown.map(m => modelCard(m, showApiTag)).join('');
+}
+
+function render() {
+  if (!data) return;
+  const models = visibleModels();
+  const probed = models.filter(m => !m.excluded);
+  const okN = probed.filter(m => m.last && m.last.status === 'ok').length;
+  const errN = probed.filter(m => m.last && m.last.status !== 'ok').length;
+  const skipN = models.length - probed.length;
+
+  document.getElementById('overview').innerHTML = `
+    <div class="stat"><div class="v">${(data.apis || []).length}</div><div class="l">API 数</div></div>
+    <div class="stat"><div class="v">${models.length}</div><div class="l">模型总数</div></div>
+    <div class="stat ok"><div class="v">${okN}</div><div class="l">正常</div></div>
+    <div class="stat err"><div class="v">${errN}</div><div class="l">异常</div></div>
+    <div class="stat skip"><div class="v">${skipN}</div><div class="l">未探测</div></div>`;
+
+  document.getElementById('subline').textContent =
+    `上次探测: ${fmtAgo(data.last_probe_end)} · 下次: ${data.probing ? '进行中…' : fmtIn(data.next_probe_at)} · 周期 ${data.interval_minutes} 分钟`;
+
+  renderTabs();
+  renderList();
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/status');
+    data = await res.json();
+    if (data.title) { document.getElementById('title').textContent = data.title; document.title = data.title; }
+    // 若当前选中的 API 已不存在则回到全部
+    if (activeApi && !(data.apis || []).includes(activeApi)) activeApi = '';
+    render();
+    document.getElementById('probeBtn').disabled = data.probing;
+    document.getElementById('probeBtn').textContent = data.probing ? '探测中…' : '立即探测';
+  } catch (e) {
+    document.getElementById('subline').textContent = '无法连接监控服务：' + e.message;
+  }
+}
+
+async function triggerProbe() {
+  document.getElementById('probeBtn').disabled = true;
+  await fetch('/api/probe', { method: 'POST' });
+  setTimeout(refresh, 1000);
+}
+
+// tooltip
+const tip = document.getElementById('tooltip');
+document.addEventListener('mouseover', e => {
+  const t = e.target.closest('.cell');
+  if (t && t.dataset.tip) { tip.textContent = t.dataset.tip; tip.style.display = 'block'; }
+});
+document.addEventListener('mousemove', e => {
+  if (tip.style.display === 'block') {
+    tip.style.left = Math.min(e.clientX + 12, innerWidth - 340) + 'px';
+    tip.style.top = (e.clientY + 14) + 'px';
+  }
+});
+document.addEventListener('mouseout', e => { if (e.target.closest('.cell')) tip.style.display = 'none'; });
+
+document.getElementById('filter').addEventListener('input', renderList);
+refresh();
+setInterval(refresh, 30000);
+setInterval(() => { if (data) render(); }, 10000); // 倒计时刷新
+</script>
+</body>
+</html>
