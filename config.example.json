@@ -13,6 +13,10 @@
       "exclude_patterns": ["*embedding*"]
     }
   ],
+  "admin": {
+    "username": "admin",
+    "password": "change-me-strong-password"
+  },
   "telegram": {
     "enabled": false,
     "bot_token": "123456:ABC-your-bot-token",

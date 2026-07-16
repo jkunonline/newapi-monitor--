@@ -8,6 +8,7 @@
 
 - 🔍 **自动发现模型**：每轮从 `/v1/models` 拉取密钥可用的全部模型（Claude / GPT / Gemini / GLM / DeepSeek / Qwen 等全部支持），新增模型自动纳入监控
 - 🔑 **多 API 支持**：可同时监控多个站点/多个密钥，页面顶部标签页点击切换分组
+- 🛠 **Web 管理面板**：管理员登录后可在网页上直接添加/编辑/删除 API，立即生效并写回配置，无需重启
 - ✅ **真实探测**：发真实 chat 请求（`max_tokens: 1`，消耗极小），能真正验证模型是否可用；思考类模型自动回退更大的 max_tokens、`max_completion_tokens`
 - 📊 **状态页**：状态点、当前延迟、24h 成功率、历史小方块（悬停看错误详情）、搜索过滤、30 秒自动刷新、手动「立即探测」
 - 📱 **Telegram 通知**：模型异常/恢复时推送，只在状态变化时通知一次，不轰炸；支持连续失败 N 次才报警（过滤抖动）
@@ -39,6 +40,10 @@ node server.js
       // 可单独加 "exclude_patterns" 覆盖全局
     }
   ],
+  "admin": {                            // Web 管理面板（可选）
+    "username": "admin",
+    "password": "强密码"                 // 非空即启用；留空/删掉则纯只读状态页
+  },
   "telegram": {
     "enabled": true,
     "bot_token": "123456:ABC-...",      // @BotFather 创建 bot 获得
@@ -58,6 +63,16 @@ node server.js
 ```
 
 兼容简化格式：顶层直接写 `base_url` + `api_key`（单 API）。
+
+### Web 管理面板
+
+配置了 `admin.password` 后，页面右上角出现「管理登录」按钮：
+
+- 登录后可**添加 / 编辑 / 删除 API**，保存即触发一轮探测，无需重启服务
+- 修改会写回 `config.json`（Docker 部署时注意 config.json 挂载不能是只读 `:ro`）
+- 登录失败 10 次同一 IP 锁 15 分钟；会话有效期 7 天（重启服务后需重新登录）
+- 编辑时 API Key 留空表示不修改；密钥在页面上只显示掩码
+- 不设置 `admin.password` 时页面是纯只读状态页，无任何管理入口
 
 ### Telegram 通知配置
 

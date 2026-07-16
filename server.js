@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // NewAPI 模型连通性监控 —— 零依赖，Node >= 18
-// 支持多个 API（多站点/多密钥），定时对每个 API 下所有模型发真实小请求。
-// 支持 Telegram 异常/恢复通知。
+// 多 API 监控 + Telegram 通知 + Web 管理面板（登录后可在线增删改 API，即时生效并持久化到 config.json）
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config.json');
@@ -35,67 +35,86 @@ function normalizeBaseUrl(u) {
     .replace(/\/v1$/, '');
 }
 
-function loadConfig() {
-  let raw;
-  try {
-    raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  } catch (e) {
-    console.error(`[config] 无法读取 ${CONFIG_PATH}: ${e.message}`);
-    process.exit(1);
-  }
-  const cfg = { ...DEFAULTS, ...raw };
-
-  // 多 API：apis 数组；兼容旧的顶层 base_url/api_key（视为一个 API）
-  let apis = Array.isArray(raw.apis) ? raw.apis : [];
-  if (!apis.length && raw.base_url && raw.api_key) {
-    apis = [{ name: '', base_url: raw.base_url, api_key: raw.api_key }];
-  }
-  cfg.apis = apis
+function deriveApis(rawApis, globalExclude) {
+  const apis = (Array.isArray(rawApis) ? rawApis : [])
     .map((a, i) => ({
       name: a.name || (() => { try { return new URL(normalizeBaseUrl(a.base_url)).hostname; } catch { return `api${i + 1}`; } })(),
       base_url: normalizeBaseUrl(a.base_url),
       api_key: a.api_key,
-      exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : cfg.exclude_patterns,
+      exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : globalExclude,
     }))
     .filter(a => {
       const bad = !a.base_url || a.base_url.includes('example.com') || !a.api_key || a.api_key === 'sk-xxx';
       if (bad) console.error(`[config] 跳过未配置完整的 API: ${a.name || a.base_url || '(空)'}`);
       return !bad;
     });
-
-  // 名称去重
   const seen = new Set();
-  for (const a of cfg.apis) {
+  for (const a of apis) {
     let n = a.name, k = 2;
     while (seen.has(n)) n = `${a.name}-${k++}`;
     a.name = n;
     seen.add(n);
   }
+  return apis;
+}
 
-  if (!cfg.apis.length) {
-    console.error('[config] 请在 config.json 中配置至少一个可用的 API（apis 数组或顶层 base_url/api_key）');
+let rawConfig = {};
+let config = {};
+
+function loadConfig() {
+  try {
+    rawConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  } catch (e) {
+    console.error(`[config] 无法读取 ${CONFIG_PATH}: ${e.message}`);
     process.exit(1);
   }
+  const cfg = { ...DEFAULTS, ...rawConfig };
+
+  // 兼容旧的顶层 base_url/api_key（视为一个 API）
+  let rawApis = Array.isArray(rawConfig.apis) ? rawConfig.apis : [];
+  if (!rawApis.length && rawConfig.base_url && rawConfig.api_key) {
+    rawApis = [{ name: '', base_url: rawConfig.base_url, api_key: rawConfig.api_key }];
+  }
+  cfg.apis = deriveApis(rawApis, cfg.exclude_patterns);
 
   // Telegram 通知：chat_id 可省略，会通过 getUpdates 自动发现（需先给 bot 发过一条消息）
-  const tg = raw.telegram || {};
+  const tg = rawConfig.telegram || {};
   cfg.telegram = {
     enabled: !!tg.enabled && !!tg.bot_token,
     bot_token: tg.bot_token || '',
     chat_id: tg.chat_id || '',
-    notify_recovery: tg.notify_recovery !== false,      // 默认恢复也通知
-    notify_after_failures: Math.max(1, tg.notify_after_failures || 1), // 连续失败 N 次才报警
+    notify_recovery: tg.notify_recovery !== false,
+    notify_after_failures: Math.max(1, tg.notify_after_failures || 1),
   };
   if (tg.enabled && !cfg.telegram.enabled) {
     console.error('[config] telegram.enabled 为 true 但缺少 bot_token，通知已禁用');
   }
+
+  // 管理员账户：password 非空才启用 Web 管理
+  const adm = rawConfig.admin || {};
+  cfg.admin = {
+    enabled: !!adm.password,
+    username: adm.username || 'admin',
+    password: adm.password || '',
+  };
+
   // 环境变量覆盖（Docker 部署时容器内需监听 0.0.0.0）
   if (process.env.HOST) cfg.host = process.env.HOST;
   if (process.env.PORT) cfg.port = parseInt(process.env.PORT, 10) || cfg.port;
-  return cfg;
+  config = cfg;
 }
 
-const config = loadConfig();
+function saveConfig() {
+  const tmp = CONFIG_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(rawConfig, null, 2) + '\n');
+  fs.renameSync(tmp, CONFIG_PATH);
+}
+
+loadConfig();
+if (!config.apis.length && !config.admin.enabled) {
+  console.error('[config] 没有可用的 API，且未设置 admin.password（无法从 Web 添加）。请在 config.json 配置其一。');
+  process.exit(1);
+}
 
 // 通配符匹配（* 匹配任意字符，大小写不敏感）
 function matchPattern(name, pattern) {
@@ -105,9 +124,8 @@ function matchPattern(name, pattern) {
 
 // ---------- 状态与历史 ----------
 
-// state.models: { ["api::model"]: { api, model, excluded, present, alerted, history: [...] } }
 const state = {
-  models: {},
+  models: {}, // { ["api::model"]: { api, model, excluded, present, alerted, history: [...] } }
   lastProbeStart: null,
   lastProbeEnd: null,
   nextProbeAt: null,
@@ -118,11 +136,10 @@ function loadHistory() {
   try {
     const saved = JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf8'));
     if (saved && typeof saved.models === 'object') {
-      // 迁移旧格式（key 不含 "::" 时归入第一个 API）
       for (const [key, m] of Object.entries(saved.models)) {
         if (key.includes(SEP)) {
           state.models[key] = m;
-        } else {
+        } else if (config.apis[0]) {
           const api = config.apis[0].name;
           state.models[`${api}${SEP}${key}`] = { ...m, api, model: key };
         }
@@ -131,9 +148,7 @@ function loadHistory() {
       const n = Object.keys(state.models).length;
       if (n) console.log(`[history] 已从 ${HISTORY_PATH} 恢复 ${n} 条模型历史`);
     }
-  } catch {
-    // 首次运行没有历史文件，忽略
-  }
+  } catch { /* 首次运行没有历史文件 */ }
 }
 
 function saveHistory() {
@@ -147,11 +162,44 @@ function saveHistory() {
   }
 }
 
+// ---------- 管理员会话 ----------
+
+const sessions = new Map(); // token -> expiry(ms)
+const SESSION_TTL = 7 * 24 * 3600 * 1000;
+const loginFails = new Map(); // ip -> { count, resetAt }
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
+function isAuthed(req) {
+  if (!config.admin.enabled) return false;
+  const token = parseCookies(req).session;
+  if (!token) return false;
+  const exp = sessions.get(token);
+  if (!exp || exp < Date.now()) { sessions.delete(token); return false; }
+  return true;
+}
+
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function clientIp(req) {
+  return req.socket.remoteAddress || 'unknown';
+}
+
 // ---------- Telegram 通知 ----------
 
 const CHATID_CACHE = path.join(ROOT, 'data', 'telegram_chat_id');
 
-// chat_id 未配置时自动发现：读缓存 → getUpdates 取最近一条私聊消息的 chat.id
 async function resolveChatId() {
   if (config.telegram.chat_id) return config.telegram.chat_id;
   try {
@@ -165,7 +213,6 @@ async function resolveChatId() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = await res.json();
     const updates = body.result || [];
-    // 从最新往回找一条带 chat 的消息（私聊/群组都行）
     for (let i = updates.length - 1; i >= 0; i--) {
       const msg = updates[i].message || updates[i].edited_message || updates[i].channel_post;
       const id = msg?.chat?.id;
@@ -177,7 +224,7 @@ async function resolveChatId() {
         return chatId;
       }
     }
-    console.error('[telegram] 未配置 chat_id 且 getUpdates 里没有消息 —— 请先在 Telegram 里给你的 bot 发一条消息（如 /start），下一轮探测会自动识别');
+    console.error('[telegram] 未配置 chat_id 且 getUpdates 里没有消息 —— 请先在 Telegram 里给你的 bot 发一条消息（如 /start）');
   } catch (e) {
     console.error(`[telegram] 自动发现 chat_id 失败: ${e.message}`);
   }
@@ -206,7 +253,6 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// 探测轮结束后根据状态变化生成并发送通知
 async function notifyChanges(changes) {
   if (!config.telegram.enabled) return;
   const downs = changes.filter(c => c.type === 'down');
@@ -328,7 +374,6 @@ function pushRecord(key, record) {
 
   const k = config.telegram.notify_after_failures;
   if (record.status !== 'ok') {
-    // 统计尾部连续失败次数
     let streak = 0;
     for (let i = entry.history.length - 1; i >= 0 && entry.history[i].status !== 'ok'; i--) streak++;
     if (streak >= k && !entry.alerted) {
@@ -351,12 +396,12 @@ async function runProbe() {
   state.lastProbeStart = Date.now();
   console.log(`[probe] 开始探测 @ ${new Date().toLocaleString()}`);
   const changes = [];
+  const apisSnapshot = [...config.apis]; // 探测中管理员改配置不影响本轮
 
-  // 逐 API 拉取模型列表
   const foundKeys = new Set();
-  const tasks = []; // {api, model, key}
+  const tasks = [];
   let skipped = 0;
-  for (const api of config.apis) {
+  for (const api of apisSnapshot) {
     try {
       const models = await fetchModels(api);
       console.log(`[probe] [${api.name}] 发现 ${models.length} 个模型`);
@@ -374,7 +419,6 @@ async function runProbe() {
       }
     } catch (e) {
       console.error(`[probe] [${api.name}] 拉取模型列表失败: ${e.message}`);
-      // 该 API 下已知模型全部记一次失败，让页面能反映站点级故障
       for (const [key, entry] of Object.entries(state.models)) {
         if (entry.api === api.name && !entry.excluded) {
           foundKeys.add(key);
@@ -384,18 +428,20 @@ async function runProbe() {
       }
     }
   }
-  // 已消失的模型保留历史但标记下线
+  const validApis = new Set(config.apis.map(a => a.name));
   for (const [key, entry] of Object.entries(state.models)) {
     if (!foundKeys.has(key)) entry.present = false;
+    if (!validApis.has(entry.api)) delete state.models[key]; // API 已被管理员删除
   }
 
-  // 并发受限的 worker 池（跨所有 API 共享）
   let index = 0;
   let okCount = 0, failCount = 0;
   const worker = async () => {
     while (index < tasks.length) {
       const { api, model, key } = tasks[index++];
+      if (!state.models[key]) continue; // 探测中该 API 被删除
       const rec = await probeModel(api, model);
+      if (!state.models[key]) continue;
       const c = pushRecord(key, rec);
       if (c) changes.push(c);
       if (rec.status === 'ok') {
@@ -405,7 +451,6 @@ async function runProbe() {
         failCount++;
         console.log(`[probe] ✗ [${api.name}] ${model} [${rec.status}${rec.http_status ? ' ' + rec.http_status : ''}] ${rec.error}`);
       }
-      // 小抖动，避免请求过于整齐触发限流
       await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
     }
   };
@@ -421,7 +466,7 @@ async function runProbe() {
 
 // ---------- HTTP 服务 ----------
 
-function buildStatus() {
+function buildStatus(req) {
   const models = Object.values(state.models).map(m => {
     const hist = m.history || [];
     const last = hist[hist.length - 1] || null;
@@ -435,7 +480,7 @@ function buildStatus() {
       present: m.present !== false,
       last,
       ok_rate_24h: okRate,
-      history: hist.slice(-60), // 页面只需要最近 60 条画方块
+      history: hist.slice(-60),
     };
   });
   models.sort((a, b) => a.api.localeCompare(b.api) || a.name.localeCompare(b.name));
@@ -448,8 +493,179 @@ function buildStatus() {
     next_probe_at: state.nextProbeAt,
     interval_minutes: config.interval_minutes,
     apis: config.apis.map(a => a.name),
+    admin_enabled: config.admin.enabled,
+    authed: isAuthed(req),
     models,
   };
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    req.on('data', c => {
+      buf += c;
+      if (buf.length > 65536) { reject(new Error('body too large')); req.destroy(); }
+    });
+    req.on('end', () => {
+      try { resolve(buf ? JSON.parse(buf) : {}); } catch { reject(new Error('invalid JSON')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function json(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+}
+
+function maskKey(k) {
+  const s = String(k || '');
+  return s.length <= 10 ? '***' : s.slice(0, 6) + '…' + s.slice(-4);
+}
+
+// rawConfig.apis 保证为数组（管理接口写入前调用）
+function ensureRawApis() {
+  if (!Array.isArray(rawConfig.apis)) {
+    rawConfig.apis = [];
+    if (rawConfig.base_url && rawConfig.api_key) {
+      rawConfig.apis.push({ name: '', base_url: rawConfig.base_url, api_key: rawConfig.api_key });
+      delete rawConfig.base_url;
+      delete rawConfig.api_key;
+    }
+  }
+}
+
+function applyApisChange() {
+  saveConfig();
+  config.apis = deriveApis(rawConfig.apis, config.exclude_patterns);
+  if (!state.probing) runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`));
+}
+
+async function handleAdmin(req, res, url) {
+  // 登录（不需要已有会话）
+  if (req.method === 'POST' && url.pathname === '/api/login') {
+    if (!config.admin.enabled) return json(res, 400, { error: '未启用管理员（config.json 中设置 admin.password）' });
+    const ip = clientIp(req);
+    const fail = loginFails.get(ip);
+    if (fail && fail.count >= 10 && Date.now() < fail.resetAt) {
+      return json(res, 429, { error: '失败次数过多，请 15 分钟后再试' });
+    }
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    if (safeEqual(body.username || '', config.admin.username) && safeEqual(body.password || '', config.admin.password)) {
+      loginFails.delete(ip);
+      const token = crypto.randomBytes(32).toString('hex');
+      sessions.set(token, Date.now() + SESSION_TTL);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Set-Cookie': `session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL / 1000}`,
+      });
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    const f = loginFails.get(ip) || { count: 0, resetAt: Date.now() + 15 * 60 * 1000 };
+    if (Date.now() > f.resetAt) { f.count = 0; f.resetAt = Date.now() + 15 * 60 * 1000; }
+    f.count++;
+    loginFails.set(ip, f);
+    return json(res, 401, { error: '用户名或密码错误' });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/logout') {
+    const token = parseCookies(req).session;
+    if (token) sessions.delete(token);
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Set-Cookie': 'session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+    });
+    return res.end(JSON.stringify({ ok: true }));
+  }
+
+  // 以下都需要登录
+  if (!isAuthed(req)) return json(res, 401, { error: '未登录' });
+
+  if (req.method === 'GET' && url.pathname === '/api/admin/apis') {
+    ensureRawApis();
+    return json(res, 200, {
+      apis: rawConfig.apis.map(a => ({
+        name: a.name || '',
+        base_url: a.base_url || '',
+        api_key_masked: maskKey(a.api_key),
+        exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : null,
+      })),
+    });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/admin/apis') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    const base_url = normalizeBaseUrl(body.base_url);
+    const api_key = String(body.api_key || '').trim();
+    const name = String(body.name || '').trim();
+    if (!base_url || !/^https?:\/\//.test(base_url)) return json(res, 400, { error: 'base_url 无效' });
+    if (!api_key) return json(res, 400, { error: 'api_key 不能为空' });
+    ensureRawApis();
+    if (name && rawConfig.apis.some(a => a.name === name)) return json(res, 400, { error: `名称 "${name}" 已存在` });
+    const entry = { name, base_url, api_key };
+    if (Array.isArray(body.exclude_patterns) && body.exclude_patterns.length) entry.exclude_patterns = body.exclude_patterns;
+    rawConfig.apis.push(entry);
+    applyApisChange();
+    console.log(`[admin] 添加 API: ${name || base_url}`);
+    return json(res, 200, { ok: true });
+  }
+
+  const apiPathMatch = url.pathname.match(/^\/api\/admin\/apis\/(.+)$/);
+  if (apiPathMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
+    const target = decodeURIComponent(apiPathMatch[1]);
+    ensureRawApis();
+    // 用派生后的名称定位原始条目（原始条目 name 可能为空）
+    const derived = deriveApis(rawConfig.apis, config.exclude_patterns);
+    const idx = derived.findIndex(a => a.name === target);
+    if (idx < 0) return json(res, 404, { error: `找不到 API "${target}"` });
+
+    if (req.method === 'DELETE') {
+      rawConfig.apis.splice(idx, 1);
+      for (const [key, entry] of Object.entries(state.models)) {
+        if (entry.api === target) delete state.models[key];
+      }
+      saveHistory();
+      applyApisChange();
+      console.log(`[admin] 删除 API: ${target}`);
+      return json(res, 200, { ok: true });
+    }
+
+    // PUT 更新
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    const item = rawConfig.apis[idx];
+    if (body.base_url !== undefined) {
+      const bu = normalizeBaseUrl(body.base_url);
+      if (!/^https?:\/\//.test(bu)) return json(res, 400, { error: 'base_url 无效' });
+      item.base_url = bu;
+    }
+    if (body.api_key !== undefined && String(body.api_key).trim()) item.api_key = String(body.api_key).trim();
+    if (body.exclude_patterns !== undefined) {
+      if (Array.isArray(body.exclude_patterns) && body.exclude_patterns.length) item.exclude_patterns = body.exclude_patterns;
+      else delete item.exclude_patterns;
+    }
+    if (body.name !== undefined && String(body.name).trim() && String(body.name).trim() !== target) {
+      const newName = String(body.name).trim();
+      if (rawConfig.apis.some((a, i) => i !== idx && a.name === newName)) return json(res, 400, { error: `名称 "${newName}" 已存在` });
+      item.name = newName;
+      // 迁移历史记录 key
+      for (const [key, entry] of Object.entries(state.models)) {
+        if (entry.api === target) {
+          entry.api = newName;
+          state.models[`${newName}${SEP}${entry.model}`] = entry;
+          delete state.models[key];
+        }
+      }
+      saveHistory();
+    }
+    applyApisChange();
+    console.log(`[admin] 更新 API: ${target}`);
+    return json(res, 200, { ok: true });
+  }
+
+  return json(res, 404, { error: 'not found' });
 }
 
 const server = http.createServer((req, res) => {
@@ -461,33 +677,43 @@ const server = http.createServer((req, res) => {
       res.end(buf);
     });
   } else if (req.method === 'GET' && url.pathname === '/api/status') {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(buildStatus()));
+    json(res, 200, buildStatus(req));
   } else if (req.method === 'POST' && url.pathname === '/api/probe') {
     const already = state.probing;
     if (!already) runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`));
-    res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ started: !already, probing: true }));
+    json(res, 202, { started: !already, probing: true });
+  } else if (url.pathname.startsWith('/api/')) {
+    handleAdmin(req, res, url).catch(e => {
+      console.error(`[admin] 处理异常: ${e.message}`);
+      try { json(res, 500, { error: '内部错误' }); } catch {}
+    });
   } else {
     res.writeHead(404);
     res.end('not found');
   }
 });
 
+// 定期清理过期会话
+setInterval(() => {
+  const now = Date.now();
+  for (const [t, exp] of sessions) if (exp < now) sessions.delete(t);
+}, 3600 * 1000);
+
 // ---------- 启动 ----------
 
 loadHistory();
 server.listen(config.port, config.host, () => {
   console.log(`[server] 状态页: http://${config.host}:${config.port}`);
-  console.log(`[server] 监控 ${config.apis.length} 个 API: ${config.apis.map(a => a.name).join(', ')}`);
+  console.log(`[server] 监控 ${config.apis.length} 个 API: ${config.apis.map(a => a.name).join(', ') || '(暂无，可从 Web 管理面板添加)'}`);
   console.log(`[server] 探测周期: ${config.interval_minutes} 分钟, 并发: ${config.concurrency}, 超时: ${config.timeout_ms}ms`);
   console.log(`[server] Telegram 通知: ${config.telegram.enabled ? '已启用' : '未启用'}`);
+  console.log(`[server] Web 管理: ${config.admin.enabled ? `已启用 (用户: ${config.admin.username})` : '未启用（config.json 设置 admin.password 后开启）'}`);
   if (config.telegram.enabled) {
     resolveChatId().then(id => {
       if (id) sendTelegram(`✅ <b>${esc(config.title)}</b> 已启动，通知链路正常`);
     });
   }
-  runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`));
-  setInterval(() => runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`)), config.interval_minutes * 60 * 1000);
+  if (config.apis.length) runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`));
+  setInterval(() => { if (config.apis.length) runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`)); }, config.interval_minutes * 60 * 1000);
   state.nextProbeAt = Date.now() + config.interval_minutes * 60 * 1000;
 });

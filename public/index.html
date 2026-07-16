@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NewAPI 模型监控</title>
+<title>模型监控</title>
 <style>
   :root {
     --bg: #0f1419; --card: #171e26; --border: #232d38;
@@ -14,8 +14,10 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; }
   .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 64px; }
+  .titlebar { display: flex; align-items: center; gap: 12px; }
   h1 { font-size: 20px; margin: 0 0 4px; }
   .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  .spacer { flex: 1; }
 
   .overview { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
   .stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 18px; min-width: 100px; }
@@ -23,7 +25,6 @@
   .stat .l { color: var(--muted); font-size: 12px; }
   .stat.ok .v { color: var(--ok); } .stat.err .v { color: var(--err); } .stat.skip .v { color: var(--muted); }
 
-  /* API 标签页 */
   .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
   .tab { background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 7px 16px; cursor: pointer; font-size: 13px; color: var(--text); display: flex; align-items: center; gap: 8px; user-select: none; transition: border-color .15s; }
   .tab:hover { border-color: #3b5266; }
@@ -33,10 +34,14 @@
   .tab .mini.ok { background: var(--ok); } .tab .mini.err { background: var(--err); } .tab .mini.na { background: var(--skip); }
 
   .toolbar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
-  input[type=search] { flex: 1; min-width: 180px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 12px; outline: none; }
-  input[type=search]:focus { border-color: var(--accent); }
+  input[type=search], input[type=text], input[type=password] { background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 8px 12px; outline: none; font-size: 13px; }
+  input[type=search] { flex: 1; min-width: 180px; }
+  input:focus { border-color: var(--accent); }
   button { background: var(--accent); border: 0; color: #fff; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 13px; }
   button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.ghost:hover { border-color: #3b5266; }
+  button.danger { background: #b62324; }
 
   .model { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; margin-bottom: 8px; }
   .row1 { display: flex; align-items: center; gap: 10px; }
@@ -58,12 +63,37 @@
   .gone { opacity: .5; }
   .empty { color: var(--muted); text-align: center; padding: 48px 0; }
 
-  #tooltip { position: fixed; background: #000c; color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 6px; pointer-events: none; display: none; max-width: 320px; z-index: 10; word-break: break-all; }
+  /* 弹窗 */
+  .overlay { position: fixed; inset: 0; background: #0009; display: none; align-items: flex-start; justify-content: center; z-index: 20; padding: 60px 16px; overflow: auto; }
+  .overlay.show { display: flex; }
+  .dialog { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 22px; width: 100%; max-width: 520px; }
+  .dialog h3 { margin: 0 0 16px; font-size: 16px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .field input { width: 100%; }
+  .dialog .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+  .formerr { color: var(--err); font-size: 12px; min-height: 16px; }
+
+  /* 管理面板 */
+  .admin-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .admin-item:last-child { border-bottom: 0; }
+  .admin-item .info { flex: 1; min-width: 0; }
+  .admin-item .info .n { font-weight: 600; }
+  .admin-item .info .u { color: var(--muted); font-size: 12px; word-break: break-all; }
+  .admin-item button { padding: 5px 12px; font-size: 12px; }
+
+  #tooltip { position: fixed; background: #000c; color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 6px; pointer-events: none; display: none; max-width: 320px; z-index: 30; word-break: break-all; }
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #000c; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 40; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1 id="title">模型监控</h1>
+  <div class="titlebar">
+    <h1 id="title">模型监控</h1>
+    <div class="spacer"></div>
+    <button class="ghost" id="adminBtn" style="display:none" onclick="onAdminBtn()">管理</button>
+    <button class="ghost" id="logoutBtn" style="display:none" onclick="logout()">退出</button>
+  </div>
   <div class="sub" id="subline">加载中…</div>
 
   <div class="overview" id="overview"></div>
@@ -77,11 +107,55 @@
 
   <div id="list"><div class="empty">加载中…</div></div>
 </div>
+
+<!-- 登录弹窗 -->
+<div class="overlay" id="loginOverlay">
+  <div class="dialog">
+    <h3>管理员登录</h3>
+    <div class="field"><label>用户名</label><input type="text" id="loginUser" value="admin"></div>
+    <div class="field"><label>密码</label><input type="password" id="loginPass"></div>
+    <div class="formerr" id="loginErr"></div>
+    <div class="actions">
+      <button class="ghost" onclick="hide('loginOverlay')">取消</button>
+      <button onclick="doLogin()">登录</button>
+    </div>
+  </div>
+</div>
+
+<!-- 管理面板 -->
+<div class="overlay" id="adminOverlay">
+  <div class="dialog">
+    <h3>API 管理</h3>
+    <div id="adminList" style="margin-bottom:16px"></div>
+    <h3 id="formTitle" style="font-size:14px">添加 API</h3>
+    <div class="field"><label>名称（可选，默认取域名）</label><input type="text" id="fName" placeholder="如 Claude01"></div>
+    <div class="field"><label>Base URL（不带 /v1）</label><input type="text" id="fUrl" placeholder="https://api.example.com"></div>
+    <div class="field"><label>API Key <span id="keyHint"></span></label><input type="text" id="fKey" placeholder="sk-..."></div>
+    <div class="formerr" id="adminErr"></div>
+    <div class="actions">
+      <button class="ghost" onclick="resetForm()">清空</button>
+      <button class="ghost" onclick="hide('adminOverlay')">关闭</button>
+      <button id="saveBtn" onclick="saveApi()">添加</button>
+    </div>
+  </div>
+</div>
+
 <div id="tooltip"></div>
+<div id="toast"></div>
 
 <script>
 let data = null;
-let activeApi = ''; // '' = 全部
+let activeApi = '';
+let editingName = null; // null=添加模式，否则为正在编辑的 API 名
+
+function $(id) { return document.getElementById(id); }
+function show(id) { $(id).classList.add('show'); }
+function hide(id) { $(id).classList.remove('show'); }
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 2500);
+}
 
 function fmtTime(t) { return t ? new Date(t).toLocaleString() : '—'; }
 function fmtAgo(t) {
@@ -98,7 +172,6 @@ function fmtIn(t) {
   if (s < 60) return s + ' 秒后';
   return Math.round(s / 60) + ' 分钟后';
 }
-
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -121,7 +194,7 @@ function apiStats(models, api) {
 function renderTabs() {
   const models = visibleModels();
   const apis = data.apis || [];
-  const el = document.getElementById('tabs');
+  const el = $('tabs');
   if (apis.length <= 1) { el.style.display = 'none'; return; }
   el.style.display = '';
 
@@ -176,36 +249,45 @@ function modelCard(m, showApiTag) {
 
 function renderList() {
   const models = visibleModels();
-  const q = document.getElementById('filter').value.trim().toLowerCase();
+  const q = $('filter').value.trim().toLowerCase();
   const shown = models.filter(m =>
     (!q || m.name.toLowerCase().includes(q)) && (!activeApi || m.api === activeApi));
 
   const badRank = m => m.excluded ? 2 : (m.last && m.last.status !== 'ok' ? 0 : 1);
   shown.sort((a, b) => badRank(a) - badRank(b) || a.name.localeCompare(b.name) || a.api.localeCompare(b.api));
 
-  const list = document.getElementById('list');
-  if (!shown.length) { list.innerHTML = '<div class="empty">没有匹配的模型</div>'; return; }
+  const list = $('list');
+  if (!shown.length) {
+    list.innerHTML = `<div class="empty">${models.length ? '没有匹配的模型' : '还没有配置 API，点右上角「管理」添加'}</div>`;
+    return;
+  }
   const showApiTag = !activeApi && (data.apis || []).length > 1;
   list.innerHTML = shown.map(m => modelCard(m, showApiTag)).join('');
 }
 
 function render() {
   if (!data) return;
+  if (data.title) { $('title').textContent = data.title; document.title = data.title; }
   const models = visibleModels();
   const probed = models.filter(m => !m.excluded);
   const okN = probed.filter(m => m.last && m.last.status === 'ok').length;
   const errN = probed.filter(m => m.last && m.last.status !== 'ok').length;
   const skipN = models.length - probed.length;
 
-  document.getElementById('overview').innerHTML = `
+  $('overview').innerHTML = `
     <div class="stat"><div class="v">${(data.apis || []).length}</div><div class="l">API 数</div></div>
     <div class="stat"><div class="v">${models.length}</div><div class="l">模型总数</div></div>
     <div class="stat ok"><div class="v">${okN}</div><div class="l">正常</div></div>
     <div class="stat err"><div class="v">${errN}</div><div class="l">异常</div></div>
     <div class="stat skip"><div class="v">${skipN}</div><div class="l">未探测</div></div>`;
 
-  document.getElementById('subline').textContent =
+  $('subline').textContent =
     `上次探测: ${fmtAgo(data.last_probe_end)} · 下次: ${data.probing ? '进行中…' : fmtIn(data.next_probe_at)} · 周期 ${data.interval_minutes} 分钟`;
+
+  // 管理按钮
+  $('adminBtn').style.display = data.admin_enabled ? '' : 'none';
+  $('adminBtn').textContent = data.authed ? '管理' : '管理登录';
+  $('logoutBtn').style.display = data.authed ? '' : 'none';
 
   renderTabs();
   renderList();
@@ -215,25 +297,139 @@ async function refresh() {
   try {
     const res = await fetch('/api/status');
     data = await res.json();
-    if (data.title) { document.getElementById('title').textContent = data.title; document.title = data.title; }
-    // 若当前选中的 API 已不存在则回到全部
     if (activeApi && !(data.apis || []).includes(activeApi)) activeApi = '';
     render();
-    document.getElementById('probeBtn').disabled = data.probing;
-    document.getElementById('probeBtn').textContent = data.probing ? '探测中…' : '立即探测';
+    $('probeBtn').disabled = data.probing;
+    $('probeBtn').textContent = data.probing ? '探测中…' : '立即探测';
   } catch (e) {
-    document.getElementById('subline').textContent = '无法连接监控服务：' + e.message;
+    $('subline').textContent = '无法连接监控服务：' + e.message;
   }
 }
 
 async function triggerProbe() {
-  document.getElementById('probeBtn').disabled = true;
+  $('probeBtn').disabled = true;
   await fetch('/api/probe', { method: 'POST' });
   setTimeout(refresh, 1000);
 }
 
+// ---------- 管理 ----------
+
+function onAdminBtn() {
+  if (data && data.authed) openAdmin();
+  else { $('loginErr').textContent = ''; show('loginOverlay'); $('loginPass').focus(); }
+}
+
+async function doLogin() {
+  $('loginErr').textContent = '';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('loginUser').value, password: $('loginPass').value }),
+    });
+    const body = await res.json();
+    if (!res.ok) { $('loginErr').textContent = body.error || '登录失败'; return; }
+    hide('loginOverlay');
+    $('loginPass').value = '';
+    await refresh();
+    openAdmin();
+  } catch (e) {
+    $('loginErr').textContent = '请求失败: ' + e.message;
+  }
+}
+
+async function logout() {
+  await fetch('/api/logout', { method: 'POST' });
+  toast('已退出');
+  refresh();
+}
+
+async function openAdmin() {
+  resetForm();
+  show('adminOverlay');
+  await loadAdminList();
+}
+
+async function loadAdminList() {
+  const el = $('adminList');
+  try {
+    const res = await fetch('/api/admin/apis');
+    if (res.status === 401) { hide('adminOverlay'); show('loginOverlay'); return; }
+    const body = await res.json();
+    if (!body.apis.length) { el.innerHTML = '<div class="empty" style="padding:16px 0">还没有 API</div>'; return; }
+    el.innerHTML = body.apis.map(a => `
+      <div class="admin-item">
+        <div class="info">
+          <div class="n">${escapeHtml(a.name || '(自动命名)')}</div>
+          <div class="u">${escapeHtml(a.base_url)} · ${escapeHtml(a.api_key_masked)}</div>
+        </div>
+        <button class="ghost" onclick="editApi('${escapeHtml(a.name)}', '${escapeHtml(a.base_url)}')">编辑</button>
+        <button class="danger" onclick="delApi('${escapeHtml(a.name)}')">删除</button>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="formerr">加载失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function resetForm() {
+  editingName = null;
+  $('formTitle').textContent = '添加 API';
+  $('saveBtn').textContent = '添加';
+  $('fName').value = ''; $('fUrl').value = ''; $('fKey').value = '';
+  $('keyHint').textContent = '';
+  $('adminErr').textContent = '';
+}
+
+function editApi(name, url) {
+  editingName = name;
+  $('formTitle').textContent = `编辑 API: ${name}`;
+  $('saveBtn').textContent = '保存';
+  $('fName').value = name;
+  $('fUrl').value = url;
+  $('fKey').value = '';
+  $('keyHint').textContent = '（留空则不修改）';
+  $('adminErr').textContent = '';
+}
+
+async function saveApi() {
+  $('adminErr').textContent = '';
+  const payload = { name: $('fName').value.trim(), base_url: $('fUrl').value.trim(), api_key: $('fKey').value.trim() };
+  try {
+    let res;
+    if (editingName) {
+      const body = { name: payload.name, base_url: payload.base_url };
+      if (payload.api_key) body.api_key = payload.api_key;
+      res = await fetch('/api/admin/apis/' + encodeURIComponent(editingName), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+    } else {
+      res = await fetch('/api/admin/apis', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+    }
+    const body = await res.json();
+    if (!res.ok) { $('adminErr').textContent = body.error || '操作失败'; return; }
+    toast(editingName ? '已保存，正在探测…' : '已添加，正在探测…');
+    resetForm();
+    await loadAdminList();
+    refresh();
+  } catch (e) {
+    $('adminErr').textContent = '请求失败: ' + e.message;
+  }
+}
+
+async function delApi(name) {
+  if (!confirm(`确定删除 API "${name}"？其监控历史也会一并删除。`)) return;
+  const res = await fetch('/api/admin/apis/' + encodeURIComponent(name), { method: 'DELETE' });
+  const body = await res.json();
+  if (!res.ok) { toast(body.error || '删除失败'); return; }
+  toast('已删除');
+  await loadAdminList();
+  refresh();
+}
+
 // tooltip
-const tip = document.getElementById('tooltip');
+const tip = $('tooltip');
 document.addEventListener('mouseover', e => {
   const t = e.target.closest('.cell');
   if (t && t.dataset.tip) { tip.textContent = t.dataset.tip; tip.style.display = 'block'; }
@@ -246,10 +442,11 @@ document.addEventListener('mousemove', e => {
 });
 document.addEventListener('mouseout', e => { if (e.target.closest('.cell')) tip.style.display = 'none'; });
 
-document.getElementById('filter').addEventListener('input', renderList);
+$('filter').addEventListener('input', renderList);
+$('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 refresh();
 setInterval(refresh, 30000);
-setInterval(() => { if (data) render(); }, 10000); // 倒计时刷新
+setInterval(() => { if (data) render(); }, 10000);
 </script>
 </body>
 </html>

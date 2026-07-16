@@ -8,7 +8,8 @@ services:
       # 若要直接公网访问改成 "8788:8788"（注意状态页无鉴权）
       - "127.0.0.1:8788:8788"
     volumes:
-      - ./config.json:/app/config.json:ro
+      # 注意：不能加 :ro —— Web 管理面板需要写回 config.json
+      - ./config.json:/app/config.json
       - ./data:/app/data
     environment:
       - HOST=0.0.0.0
