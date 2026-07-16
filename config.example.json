@@ -29,6 +29,8 @@
   "concurrency": 3,
   "max_tokens": 1,
   "fallback_max_tokens": 4096,
+  "confirm_retries": 2,
+  "confirm_retry_delay_ms": 5000,
   "exclude_patterns": ["*dall-e*", "*tts*", "*whisper*", "*midjourney*", "*mj_*", "*flux*", "*embedding*", "*embed*", "*rerank*", "*stable-diffusion*", "*sd3*", "*suno*", "*sora*", "*moderation*"],
   "port": 8788,
   "host": "127.0.0.1"

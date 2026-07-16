@@ -22,6 +22,8 @@ const DEFAULTS = {
   concurrency: 3,
   max_tokens: 1,
   fallback_max_tokens: 4096, // 思考类模型 max_tokens=1 会报错，回退用这个值重试
+  confirm_retries: 2,        // 探测失败后再快速复测 N 次，全失败才记异常
+  confirm_retry_delay_ms: 5000, // 复测间隔
   exclude_patterns: [],
   port: 8788,
   host: '127.0.0.1',
@@ -376,6 +378,25 @@ async function probeModel(api, model) {
   }
 }
 
+// 探测 + 失败复核：首测失败后短间隔快速复测，只要有一次成功就算正常，
+// 全部失败才记异常（避免瞬时抖动/偶发限流造成误报）
+async function probeModelConfirmed(api, model) {
+  let rec = await probeModel(api, model);
+  if (rec.status === 'ok') return rec;
+  const total = 1 + config.confirm_retries;
+  for (let attempt = 2; attempt <= total; attempt++) {
+    console.log(`[probe] ? [${api.name}] ${model} 第 ${attempt - 1} 次失败，${Math.round(config.confirm_retry_delay_ms / 1000)}s 后复测 (${attempt}/${total})`);
+    await new Promise(r => setTimeout(r, config.confirm_retry_delay_ms));
+    rec = await probeModel(api, model);
+    if (rec.status === 'ok') {
+      console.log(`[probe] ✓ [${api.name}] ${model} 复测通过（第 ${attempt} 次成功）`);
+      return rec;
+    }
+  }
+  rec.error = `连续 ${total} 次失败 · ${rec.error || rec.status}`;
+  return rec;
+}
+
 // 追加记录并返回状态变化事件（down / up / null）
 function pushRecord(key, record) {
   const entry = state.models[key];
@@ -462,7 +483,7 @@ async function runProbe(scope = null) {
     while (index < tasks.length) {
       const { api, model, key } = tasks[index++];
       if (!state.models[key]) continue; // 探测中该 API 被删除
-      const rec = await probeModel(api, model);
+      const rec = await probeModelConfirmed(api, model);
       if (!state.models[key]) continue;
       const c = pushRecord(key, rec);
       if (c) changes.push(c);
