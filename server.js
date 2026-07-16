@@ -513,7 +513,8 @@ function buildStatus(req) {
       history: hist.slice(-60),
     };
   });
-  models.sort((a, b) => a.api.localeCompare(b.api) || a.name.localeCompare(b.name));
+  const apiOrder = new Map(config.apis.map((a, i) => [a.name, i]));
+  models.sort((a, b) => (apiOrder.get(a.api) ?? 999) - (apiOrder.get(b.api) ?? 999) || a.name.localeCompare(b.name));
   return {
     title: config.title,
     generated_at: Date.now(),
@@ -614,14 +615,42 @@ async function handleAdmin(req, res, url) {
 
   if (req.method === 'GET' && url.pathname === '/api/admin/apis') {
     ensureRawApis();
+    const derived = deriveApis(rawConfig.apis, config.exclude_patterns);
+    // 全部条目有效时索引一一对应，可展示派生名（含自动命名/去重后的结果）
+    const aligned = derived.length === rawConfig.apis.length;
     return json(res, 200, {
-      apis: rawConfig.apis.map(a => ({
-        name: a.name || '',
+      apis: rawConfig.apis.map((a, i) => ({
+        name: aligned ? derived[i].name : (a.name || ''),
         base_url: a.base_url || '',
         api_key_masked: maskKey(a.api_key),
         exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : null,
       })),
     });
+  }
+
+  // 分组排序：body.order 为派生名称的新顺序
+  if (req.method === 'POST' && url.pathname === '/api/admin/apis/reorder') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    if (!Array.isArray(body.order)) return json(res, 400, { error: 'order 必须是数组' });
+    ensureRawApis();
+    const derived = deriveApis(rawConfig.apis, config.exclude_patterns);
+    if (derived.length !== rawConfig.apis.length) {
+      return json(res, 400, { error: '存在无效的 API 条目，请先在 config.json 中清理后再排序' });
+    }
+    if (body.order.length !== derived.length || new Set(body.order).size !== derived.length ||
+        !body.order.every(n => derived.some(a => a.name === n))) {
+      return json(res, 400, { error: 'order 与现有分组不匹配，请刷新后重试' });
+    }
+    rawConfig.apis = body.order.map(n => rawConfig.apis[derived.findIndex(a => a.name === n)]);
+    try {
+      saveConfig();
+      config.apis = deriveApis(rawConfig.apis, config.exclude_patterns);
+    } catch (e) {
+      return json(res, 500, { error: `配置保存失败：${String(e.message).slice(0, 200)}` });
+    }
+    console.log(`[admin] 分组排序: ${body.order.join(' → ')}`);
+    return json(res, 200, { ok: true });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/admin/apis') {

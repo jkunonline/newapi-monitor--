@@ -82,6 +82,9 @@
   .admin-item .info .n { font-weight: 600; }
   .admin-item .info .u { color: var(--muted); font-size: 12px; word-break: break-all; }
   .admin-item button { padding: 5px 12px; font-size: 12px; }
+  .admin-item .arrows { display: flex; flex-direction: column; gap: 2px; }
+  .admin-item .arrows button { padding: 0 6px; font-size: 11px; line-height: 16px; }
+  .admin-item .arrows button:disabled { opacity: .25; }
 
   #tooltip { position: fixed; background: #000c; color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 6px; pointer-events: none; display: none; max-width: 320px; z-index: 30; word-break: break-all; }
   #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #000c; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 40; }
@@ -392,15 +395,22 @@ async function openAdmin() {
   await loadAdminList();
 }
 
+let adminApiNames = []; // 管理面板当前的分组顺序
+
 async function loadAdminList() {
   const el = $('adminList');
   try {
     const res = await fetch('/api/admin/apis');
     if (res.status === 401) { hide('adminOverlay'); show('loginOverlay'); return; }
     const body = await res.json();
-    if (!body.apis.length) { el.innerHTML = '<div class="empty" style="padding:16px 0">还没有 API</div>'; return; }
-    el.innerHTML = body.apis.map(a => `
+    if (!body.apis.length) { adminApiNames = []; el.innerHTML = '<div class="empty" style="padding:16px 0">还没有 API</div>'; return; }
+    adminApiNames = body.apis.map(a => a.name);
+    el.innerHTML = body.apis.map((a, i) => `
       <div class="admin-item">
+        <div class="arrows">
+          <button class="ghost" ${i === 0 ? 'disabled' : ''} onclick="moveApi(${i}, -1)" title="上移">▲</button>
+          <button class="ghost" ${i === body.apis.length - 1 ? 'disabled' : ''} onclick="moveApi(${i}, 1)" title="下移">▼</button>
+        </div>
         <div class="info">
           <div class="n">${escapeHtml(a.name || '(自动命名)')}</div>
           <div class="u">${escapeHtml(a.base_url)} · ${escapeHtml(a.api_key_masked)}</div>
@@ -411,6 +421,20 @@ async function loadAdminList() {
   } catch (e) {
     el.innerHTML = `<div class="formerr">加载失败: ${escapeHtml(e.message)}</div>`;
   }
+}
+
+async function moveApi(index, dir) {
+  const order = [...adminApiNames];
+  const j = index + dir;
+  if (j < 0 || j >= order.length) return;
+  [order[index], order[j]] = [order[j], order[index]];
+  const res = await fetch('/api/admin/apis/reorder', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { toast(body.error || '排序失败'); return; }
+  await loadAdminList();
+  refresh(); // 标签页与模型列表立即按新顺序显示
 }
 
 function resetForm() {
