@@ -102,7 +102,8 @@
 
   <div class="toolbar">
     <input type="search" id="filter" placeholder="搜索模型名…">
-    <button id="probeBtn" onclick="triggerProbe()">立即探测</button>
+    <button id="probeBtn" style="display:none" onclick="triggerProbe(false)">立即探测</button>
+    <button id="probeAllBtn" class="ghost" style="display:none" onclick="triggerProbe(true)">全部探测</button>
   </div>
 
   <div id="list"><div class="empty">加载中…</div></div>
@@ -112,7 +113,7 @@
 <div class="overlay" id="loginOverlay">
   <div class="dialog">
     <h3>管理员登录</h3>
-    <div class="field"><label>用户名</label><input type="text" id="loginUser" value="admin"></div>
+    <div class="field"><label>用户名</label><input type="text" id="loginUser" autocomplete="username"></div>
     <div class="field"><label>密码</label><input type="password" id="loginPass"></div>
     <div class="formerr" id="loginErr"></div>
     <div class="actions">
@@ -175,6 +176,7 @@ function fmtIn(t) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+function fmtLat(ms) { return (ms / 1000).toFixed(2) + 's'; }
 
 function visibleModels() {
   if (!data) return [];
@@ -195,7 +197,7 @@ function renderTabs() {
   const models = visibleModels();
   const apis = data.apis || [];
   const el = $('tabs');
-  if (apis.length <= 1) { el.style.display = 'none'; return; }
+  if (!apis.length) { el.style.display = 'none'; return; }
   el.style.display = '';
 
   const tab = (id, label, stats) => {
@@ -215,6 +217,7 @@ function renderTabs() {
       activeApi = t.dataset.api;
       renderTabs();
       renderList();
+      updateProbeButtons();
     });
   });
 }
@@ -226,7 +229,7 @@ function modelCard(m, showApiTag) {
   const rate = m.ok_rate_24h;
   const rateCls = rate == null ? '' : rate >= 0.99 ? 'good' : rate >= 0.9 ? 'mid' : 'bad';
   const cells = (m.history || []).map(h =>
-    `<div class="cell ${h.status}" data-tip="${fmtTime(h.t)} · ${h.status}${h.latency_ms ? ' · ' + h.latency_ms + 'ms' : ''}${h.error ? ' · ' + escapeHtml(h.error) : ''}"></div>`
+    `<div class="cell ${h.status}" data-tip="${fmtTime(h.t)} · ${h.status}${h.latency_ms ? ' · ' + fmtLat(h.latency_ms) : ''}${h.error ? ' · ' + escapeHtml(h.error) : ''}"></div>`
   ).join('');
   const lastErr = !m.excluded && m.last && m.last.status !== 'ok'
     ? `<div class="errline">${m.last.http_status ? 'HTTP ' + m.last.http_status + ' · ' : ''}${escapeHtml(m.last.error || m.last.status)}</div>` : '';
@@ -238,7 +241,7 @@ function modelCard(m, showApiTag) {
       ${m.excluded ? '<span class="badge">未探测</span>' : ''}
       ${m.present === false ? '<span class="badge">已下线</span>' : ''}
       <div class="meta">
-        ${lat != null ? `<span class="lat ${latCls}">${lat}ms</span>` : ''}
+        ${lat != null ? `<span class="lat ${latCls}">${fmtLat(lat)}</span>` : ''}
         ${rate != null ? `<span class="rate ${rateCls}">24h ${(rate * 100).toFixed(1)}%</span>` : ''}
       </div>
     </div>
@@ -264,6 +267,8 @@ function renderList() {
   const showApiTag = !activeApi && (data.apis || []).length > 1;
   list.innerHTML = shown.map(m => modelCard(m, showApiTag)).join('');
 }
+
+// 编辑/添加共用的表单联动已在下方管理函数中处理
 
 function render() {
   if (!data) return;
@@ -299,16 +304,51 @@ async function refresh() {
     data = await res.json();
     if (activeApi && !(data.apis || []).includes(activeApi)) activeApi = '';
     render();
-    $('probeBtn').disabled = data.probing;
-    $('probeBtn').textContent = data.probing ? '探测中…' : '立即探测';
+    updateProbeButtons();
   } catch (e) {
     $('subline').textContent = '无法连接监控服务：' + e.message;
   }
 }
 
-async function triggerProbe() {
+// 探测按钮：仅管理员可见；「立即探测」按当前分组/搜索词缩小范围，「全部探测」跑所有分组
+function updateProbeButtons() {
+  const authed = data && data.authed;
+  const probeBtn = $('probeBtn'), allBtn = $('probeAllBtn');
+  probeBtn.style.display = authed ? '' : 'none';
+  allBtn.style.display = authed ? '' : 'none';
+  if (!authed) return;
+  probeBtn.disabled = allBtn.disabled = data.probing;
+  const q = $('filter').value.trim();
+  let label = '探测当前';
+  if (activeApi && q) label = `探测 ${activeApi} 匹配项`;
+  else if (activeApi) label = `探测 ${activeApi}`;
+  else label = '探测全部分组';
+  probeBtn.textContent = data.probing ? '探测中…' : label;
+  allBtn.textContent = data.probing ? '探测中…' : '全部探测';
+  // 没选分组时「立即探测」等同全部，隐藏冗余按钮
+  allBtn.style.display = authed && activeApi ? '' : 'none';
+}
+
+async function triggerProbe(all) {
   $('probeBtn').disabled = true;
-  await fetch('/api/probe', { method: 'POST' });
+  $('probeAllBtn').disabled = true;
+  let qs = '';
+  if (!all && activeApi) {
+    qs = '?api=' + encodeURIComponent(activeApi);
+    const q = $('filter').value.trim();
+    // 搜索词精确匹配到当前分组的某个模型时，只探测该模型
+    if (q) {
+      const inGroup = visibleModels().filter(m => m.api === activeApi && !m.excluded);
+      const exact = inGroup.find(m => m.name.toLowerCase() === q.toLowerCase());
+      const matched = inGroup.filter(m => m.name.toLowerCase().includes(q.toLowerCase()));
+      const target = exact || (matched.length === 1 ? matched[0] : null);
+      if (target) qs += '&model=' + encodeURIComponent(target.name);
+    }
+  }
+  const res = await fetch('/api/probe' + qs, { method: 'POST' });
+  if (res.status === 401) { toast('请先登录管理员'); show('loginOverlay'); }
+  else if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.error || '探测请求失败'); }
+  else toast(qs.includes('model=') ? '正在探测该模型…' : qs ? '正在探测该分组…' : '正在探测全部分组…');
   setTimeout(refresh, 1000);
 }
 
@@ -316,7 +356,7 @@ async function triggerProbe() {
 
 function onAdminBtn() {
   if (data && data.authed) openAdmin();
-  else { $('loginErr').textContent = ''; show('loginOverlay'); $('loginPass').focus(); }
+  else { $('loginErr').textContent = ''; show('loginOverlay'); ($('loginUser').value ? $('loginPass') : $('loginUser')).focus(); }
 }
 
 async function doLogin() {
@@ -393,6 +433,9 @@ function editApi(name, url) {
 
 async function saveApi() {
   $('adminErr').textContent = '';
+  const btn = $('saveBtn');
+  btn.disabled = true;
+  btn.textContent = editingName ? '验证中…' : '验证并添加…';
   const payload = { name: $('fName').value.trim(), base_url: $('fUrl').value.trim(), api_key: $('fKey').value.trim() };
   try {
     let res;
@@ -409,12 +452,21 @@ async function saveApi() {
     }
     const body = await res.json();
     if (!res.ok) { $('adminErr').textContent = body.error || '操作失败'; return; }
-    toast(editingName ? '已保存，正在探测…' : '已添加，正在探测…');
+    toast(editingName ? '已保存，正在探测…' : `已添加（发现 ${body.model_count || '?'} 个模型），正在探测…`);
     resetForm();
     await loadAdminList();
-    refresh();
+    await refresh();
+    // 探测进行中持续刷新，模型陆续出现
+    let ticks = 0;
+    const timer = setInterval(async () => {
+      await refresh();
+      if (++ticks > 20 || (data && !data.probing)) clearInterval(timer);
+    }, 3000);
   } catch (e) {
     $('adminErr').textContent = '请求失败: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = editingName ? '保存' : '添加';
   }
 }
 
@@ -442,7 +494,7 @@ document.addEventListener('mousemove', e => {
 });
 document.addEventListener('mouseout', e => { if (e.target.closest('.cell')) tip.style.display = 'none'; });
 
-$('filter').addEventListener('input', renderList);
+$('filter').addEventListener('input', () => { renderList(); if (data) updateProbeButtons(); });
 $('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 refresh();
 setInterval(refresh, 30000);

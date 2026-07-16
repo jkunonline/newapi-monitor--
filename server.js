@@ -28,11 +28,14 @@ const DEFAULTS = {
 };
 
 function normalizeBaseUrl(u) {
-  return String(u || '')
+  let s = String(u || '')
     .trim()
     .replace(/^(https?:\/\/)+(https?:\/\/)/, '$2') // 容错重复协议头
     .replace(/\/+$/, '')
     .replace(/\/v1$/, '');
+  // 没写协议时自动补 https://
+  if (s && !/^https?:\/\//i.test(s)) s = 'https://' + s;
+  return s;
 }
 
 function deriveApis(rawApis, globalExclude) {
@@ -105,9 +108,16 @@ function loadConfig() {
 }
 
 function saveConfig() {
-  const tmp = CONFIG_PATH + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(rawConfig, null, 2) + '\n');
-  fs.renameSync(tmp, CONFIG_PATH);
+  const content = JSON.stringify(rawConfig, null, 2) + '\n';
+  try {
+    const tmp = CONFIG_PATH + '.tmp';
+    fs.writeFileSync(tmp, content);
+    fs.renameSync(tmp, CONFIG_PATH);
+  } catch (e) {
+    // Docker 单文件挂载时 rename 会报 EBUSY/EXDEV，退化为直接写
+    try { fs.unlinkSync(CONFIG_PATH + '.tmp'); } catch {}
+    fs.writeFileSync(CONFIG_PATH, content);
+  }
 }
 
 loadConfig();
@@ -270,7 +280,7 @@ async function notifyChanges(changes) {
   if (ups.length) {
     lines.push('', `🟢 <b>已恢复 (${ups.length})</b>`);
     for (const c of ups.slice(0, 20)) {
-      lines.push(`• [${esc(c.api)}] <code>${esc(c.model)}</code>${c.latency_ms ? ` ${c.latency_ms}ms` : ''}`);
+      lines.push(`• [${esc(c.api)}] <code>${esc(c.model)}</code>${c.latency_ms ? ` ${(c.latency_ms / 1000).toFixed(2)}s` : ''}`);
     }
     if (ups.length > 20) lines.push(`… 以及另外 ${ups.length - 20} 个`);
   }
@@ -387,16 +397,21 @@ function pushRecord(key, record) {
   return null;
 }
 
-async function runProbe() {
+// scope: null=全部；{apiName}=只探测该分组；{apiName, modelName}=只探测该分组下的单个模型
+async function runProbe(scope = null) {
   if (state.probing) {
-    console.log('[probe] 上一轮探测仍在进行，跳过');
+    state.probeQueue = state.probeQueue || [];
+    state.probeQueue.push(scope);
+    console.log('[probe] 上一轮探测仍在进行，已排队');
     return;
   }
   state.probing = true;
   state.lastProbeStart = Date.now();
-  console.log(`[probe] 开始探测 @ ${new Date().toLocaleString()}`);
+  const isFull = !scope || (!scope.apiName && !scope.modelName);
+  const scopeDesc = isFull ? '全部' : scope.modelName ? `[${scope.apiName}] ${scope.modelName}` : `[${scope.apiName}]`;
+  console.log(`[probe] 开始探测 (${scopeDesc}) @ ${new Date().toLocaleString()}`);
   const changes = [];
-  const apisSnapshot = [...config.apis]; // 探测中管理员改配置不影响本轮
+  const apisSnapshot = config.apis.filter(a => !scope?.apiName || a.name === scope.apiName); // 探测中管理员改配置不影响本轮
 
   const foundKeys = new Set();
   const tasks = [];
@@ -404,8 +419,9 @@ async function runProbe() {
   for (const api of apisSnapshot) {
     try {
       const models = await fetchModels(api);
-      console.log(`[probe] [${api.name}] 发现 ${models.length} 个模型`);
+      if (isFull) console.log(`[probe] [${api.name}] 发现 ${models.length} 个模型`);
       for (const m of models) {
+        if (scope?.modelName && m !== scope.modelName) continue;
         const key = `${api.name}${SEP}${m}`;
         foundKeys.add(key);
         if (!state.models[key]) state.models[key] = { api: api.name, model: m, excluded: false, history: [] };
@@ -417,10 +433,13 @@ async function runProbe() {
         if (entry.excluded) skipped++;
         else tasks.push({ api, model: m, key });
       }
+      if (scope?.modelName && !tasks.length && !skipped) {
+        console.log(`[probe] [${api.name}] 模型 ${scope.modelName} 不在列表中`);
+      }
     } catch (e) {
       console.error(`[probe] [${api.name}] 拉取模型列表失败: ${e.message}`);
       for (const [key, entry] of Object.entries(state.models)) {
-        if (entry.api === api.name && !entry.excluded) {
+        if (entry.api === api.name && !entry.excluded && (!scope?.modelName || entry.model === scope.modelName)) {
           foundKeys.add(key);
           const c = pushRecord(key, { t: Date.now(), status: 'error', latency_ms: 0, http_status: 0, error: `模型列表拉取失败: ${String(e.message).slice(0, 200)}` });
           if (c) changes.push(c);
@@ -428,10 +447,13 @@ async function runProbe() {
       }
     }
   }
-  const validApis = new Set(config.apis.map(a => a.name));
-  for (const [key, entry] of Object.entries(state.models)) {
-    if (!foundKeys.has(key)) entry.present = false;
-    if (!validApis.has(entry.api)) delete state.models[key]; // API 已被管理员删除
+  // 下线标记和已删 API 清理只在全量探测时做（局部探测的 foundKeys 不完整）
+  if (isFull) {
+    const validApis = new Set(config.apis.map(a => a.name));
+    for (const [key, entry] of Object.entries(state.models)) {
+      if (!foundKeys.has(key)) entry.present = false;
+      if (!validApis.has(entry.api)) delete state.models[key]; // API 已被管理员删除
+    }
   }
 
   let index = 0;
@@ -457,11 +479,19 @@ async function runProbe() {
   await Promise.all(Array.from({ length: Math.min(config.concurrency, tasks.length) }, worker));
 
   state.lastProbeEnd = Date.now();
-  state.nextProbeAt = Date.now() + config.interval_minutes * 60 * 1000;
+  if (isFull) state.nextProbeAt = Date.now() + config.interval_minutes * 60 * 1000;
   state.probing = false;
   saveHistory();
-  console.log(`[probe] 完成: ${okCount} 正常 / ${failCount} 异常 / ${skipped} 跳过`);
+  console.log(`[probe] 完成 (${scopeDesc}): ${okCount} 正常 / ${failCount} 异常 / ${skipped} 跳过`);
   await notifyChanges(changes);
+  const queue = state.probeQueue;
+  if (queue && queue.length) {
+    // 队列里含全量请求则跑全量，否则跑最早的局部请求
+    const next = queue.some(s => !s || (!s.apiName && !s.modelName)) ? null : queue[0];
+    state.probeQueue = [];
+    console.log('[probe] 执行排队的探测请求');
+    runProbe(next).catch(e => console.error(`[probe] 异常: ${e.message}`));
+  }
 }
 
 // ---------- HTTP 服务 ----------
@@ -600,16 +630,32 @@ async function handleAdmin(req, res, url) {
     const base_url = normalizeBaseUrl(body.base_url);
     const api_key = String(body.api_key || '').trim();
     const name = String(body.name || '').trim();
-    if (!base_url || !/^https?:\/\//.test(base_url)) return json(res, 400, { error: 'base_url 无效' });
+    if (!base_url || !/^https?:\/\//.test(base_url)) return json(res, 400, { error: 'base_url 无效，示例: https://api.example.com' });
     if (!api_key) return json(res, 400, { error: 'api_key 不能为空' });
     ensureRawApis();
-    if (name && rawConfig.apis.some(a => a.name === name)) return json(res, 400, { error: `名称 "${name}" 已存在` });
+    if (name && deriveApis(rawConfig.apis, config.exclude_patterns).some(a => a.name === name)) {
+      return json(res, 400, { error: `名称 "${name}" 已存在` });
+    }
+    // 保存前先验证连通性，问题立刻反馈
+    let modelCount = 0;
+    try {
+      const models = await fetchModels({ base_url, api_key });
+      modelCount = models.length;
+      if (!modelCount) return json(res, 400, { error: '验证失败：/v1/models 返回了空列表，请检查密钥的模型权限' });
+    } catch (e) {
+      return json(res, 400, { error: `验证失败：${String(e.message).slice(0, 200)}` });
+    }
     const entry = { name, base_url, api_key };
     if (Array.isArray(body.exclude_patterns) && body.exclude_patterns.length) entry.exclude_patterns = body.exclude_patterns;
     rawConfig.apis.push(entry);
-    applyApisChange();
-    console.log(`[admin] 添加 API: ${name || base_url}`);
-    return json(res, 200, { ok: true });
+    try {
+      applyApisChange();
+    } catch (e) {
+      rawConfig.apis.pop();
+      return json(res, 500, { error: `配置保存失败：${String(e.message).slice(0, 200)}` });
+    }
+    console.log(`[admin] 添加 API: ${name || base_url} (${modelCount} 个模型)`);
+    return json(res, 200, { ok: true, model_count: modelCount });
   }
 
   const apiPathMatch = url.pathname.match(/^\/api\/admin\/apis\/(.+)$/);
@@ -660,7 +706,11 @@ async function handleAdmin(req, res, url) {
       }
       saveHistory();
     }
-    applyApisChange();
+    try {
+      applyApisChange();
+    } catch (e) {
+      return json(res, 500, { error: `配置保存失败：${String(e.message).slice(0, 200)}` });
+    }
     console.log(`[admin] 更新 API: ${target}`);
     return json(res, 200, { ok: true });
   }
@@ -679,9 +729,13 @@ const server = http.createServer((req, res) => {
   } else if (req.method === 'GET' && url.pathname === '/api/status') {
     json(res, 200, buildStatus(req));
   } else if (req.method === 'POST' && url.pathname === '/api/probe') {
-    const already = state.probing;
-    if (!already) runProbe().catch(e => console.error(`[probe] 异常: ${e.message}`));
-    json(res, 202, { started: !already, probing: true });
+    if (!isAuthed(req)) { json(res, 401, { error: '仅管理员可手动探测' }); return; }
+    const apiName = url.searchParams.get('api') || '';
+    const modelName = url.searchParams.get('model') || '';
+    if (apiName && !config.apis.some(a => a.name === apiName)) { json(res, 404, { error: `找不到分组 "${apiName}"` }); return; }
+    const scope = apiName ? { apiName, modelName: modelName || undefined } : null;
+    runProbe(scope).catch(e => console.error(`[probe] 异常: ${e.message}`));
+    json(res, 202, { probing: true });
   } else if (url.pathname.startsWith('/api/')) {
     handleAdmin(req, res, url).catch(e => {
       console.error(`[admin] 处理异常: ${e.message}`);
