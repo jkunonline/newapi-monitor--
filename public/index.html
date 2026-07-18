@@ -131,19 +131,28 @@
   </div>
 </div>
 
-<!-- 管理面板 -->
+<!-- 管理面板：分组列表 -->
 <div class="overlay" id="adminOverlay">
   <div class="dialog">
     <h3>API 管理</h3>
     <div id="adminList" style="margin-bottom:16px"></div>
-    <h3 id="formTitle" style="font-size:14px">添加 API</h3>
+    <div class="actions">
+      <button class="ghost" onclick="hide('adminOverlay')">关闭</button>
+      <button onclick="openEdit()">＋ 添加 API</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加/编辑弹窗 -->
+<div class="overlay" id="editOverlay">
+  <div class="dialog">
+    <h3 id="formTitle">添加 API</h3>
     <div class="field"><label>名称（可选，默认取域名）</label><input type="text" id="fName" placeholder="如 Claude01"></div>
     <div class="field"><label>Base URL（不带 /v1）</label><input type="text" id="fUrl" placeholder="https://api.example.com"></div>
     <div class="field"><label>API Key <span id="keyHint"></span></label><input type="text" id="fKey" placeholder="sk-..."></div>
     <div class="formerr" id="adminErr"></div>
     <div class="actions">
-      <button class="ghost" onclick="resetForm()">清空</button>
-      <button class="ghost" onclick="hide('adminOverlay')">关闭</button>
+      <button class="ghost" onclick="hide('editOverlay')">取消</button>
       <button id="saveBtn" onclick="saveApi()">添加</button>
     </div>
   </div>
@@ -427,7 +436,6 @@ async function logout() {
 }
 
 async function openAdmin() {
-  resetForm();
   show('adminOverlay');
   await loadAdminList();
 }
@@ -516,6 +524,14 @@ function resetForm() {
   $('adminErr').textContent = '';
 }
 
+// 打开添加弹窗
+function openEdit() {
+  resetForm();
+  show('editOverlay');
+  $('fName').focus();
+}
+
+// 打开编辑弹窗
 function editApi(name, url) {
   editingName = name;
   $('formTitle').textContent = `编辑 API: ${name}`;
@@ -525,6 +541,8 @@ function editApi(name, url) {
   $('fKey').value = '';
   $('keyHint').textContent = '（留空则不修改）';
   $('adminErr').textContent = '';
+  show('editOverlay');
+  $('fName').focus();
 }
 
 async function saveApi() {
@@ -548,6 +566,7 @@ async function saveApi() {
     }
     const body = await res.json();
     if (!res.ok) { $('adminErr').textContent = body.error || '操作失败'; return; }
+    hide('editOverlay');
     toast(editingName ? '已保存，正在探测…' : `已添加（发现 ${body.model_count || '?'} 个模型），正在探测…`);
     resetForm();
     await loadAdminList();
@@ -592,6 +611,13 @@ document.addEventListener('mouseout', e => { if (e.target.closest('.cell')) tip.
 
 $('filter').addEventListener('input', () => { renderList(); if (data) updateProbeButtons(); });
 $('loginPass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+$('fKey').addEventListener('keydown', e => { if (e.key === 'Enter') saveApi(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') ['editOverlay', 'adminOverlay', 'loginOverlay'].some(id => {
+    if ($(id).classList.contains('show')) { hide(id); return true; }
+    return false;
+  });
+});
 refresh();
 setInterval(refresh, 30000);
 setInterval(() => { if (data) render(); }, 10000);
