@@ -350,7 +350,7 @@ async function refreshModelList() {
     if (!res.ok) { toast(body.error || '刷新失败'); return; }
     let msg = `列表已刷新：共 ${body.total} 个模型`;
     if (body.added) msg += `，新增 ${body.added} 个（正在探测）`;
-    if (body.removed) msg += `，下线 ${body.removed} 个`;
+    if (body.removed) msg += `，移除 ${body.removed} 个已下线模型`;
     if (body.errors && body.errors.length) msg += `；部分失败: ${body.errors.join('; ')}`;
     toast(msg);
     await refresh();

@@ -456,12 +456,16 @@ async function runProbe(scope = null) {
       }
     }
   }
-  // 下线标记和已删 API 清理只在全量探测时做（局部探测的 foundKeys 不完整）
+  // 下线清理只在全量探测时做（局部探测的 foundKeys 不完整）。
+  // 注意：某 API 列表拉取失败时其已知模型都在 foundKeys 里，不会被误删。
   if (isFull) {
     const validApis = new Set(config.apis.map(a => a.name));
     for (const [key, entry] of Object.entries(state.models)) {
-      if (!foundKeys.has(key)) entry.present = false;
-      if (!validApis.has(entry.api)) delete state.models[key]; // API 已被管理员删除
+      if (!validApis.has(entry.api)) { delete state.models[key]; continue; } // API 已被管理员删除
+      if (!foundKeys.has(key)) {
+        console.log(`[probe] − [${entry.api}] ${entry.model} 已从列表移除，删除记录`);
+        delete state.models[key];
+      }
     }
   }
 
@@ -682,13 +686,13 @@ async function handleAdmin(req, res, url) {
             newModels.push(m);
           }
           const entry = state.models[key];
-          if (entry.present === false) { entry.present = true; if (!entry.history.length) newModels.push(m); }
-          else entry.present = true;
+          entry.present = true;
           entry.excluded = api.exclude_patterns.some(p => matchPattern(m, p));
         }
         for (const [key, entry] of Object.entries(state.models)) {
-          if (entry.api === api.name && !found.has(key) && entry.present !== false) {
-            entry.present = false;
+          if (entry.api === api.name && !found.has(key)) {
+            console.log(`[admin] [${api.name}] ${entry.model} 已从列表移除，删除记录`);
+            delete state.models[key];
             removed++;
           }
         }
