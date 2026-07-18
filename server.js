@@ -22,8 +22,8 @@ const DEFAULTS = {
   concurrency: 3,
   max_tokens: 1,
   fallback_max_tokens: 4096, // 思考类模型 max_tokens=1 会报错，回退用这个值重试
-  confirm_retries: 2,        // 探测失败后再快速复测 N 次，全失败才记异常
-  confirm_retry_delay_ms: 5000, // 复测间隔
+  confirm_retries: 2,        // 探测失败后再复测 N 次（共 1+N 次），全失败才记异常
+  confirm_retry_delay_ms: 30000, // 复测间隔：30 秒，给号池轮换的时间，避免连续打到同一个坏号
   exclude_patterns: [],
   port: 8788,
   host: '127.0.0.1',
@@ -378,24 +378,8 @@ async function probeModel(api, model) {
   }
 }
 
-// 探测 + 失败复核：首测失败后短间隔快速复测，只要有一次成功就算正常，
-// 全部失败才记异常（避免瞬时抖动/偶发限流造成误报）
-async function probeModelConfirmed(api, model) {
-  let rec = await probeModel(api, model);
-  if (rec.status === 'ok') return rec;
-  const total = 1 + config.confirm_retries;
-  for (let attempt = 2; attempt <= total; attempt++) {
-    console.log(`[probe] ? [${api.name}] ${model} 第 ${attempt - 1} 次失败，${Math.round(config.confirm_retry_delay_ms / 1000)}s 后复测 (${attempt}/${total})`);
-    await new Promise(r => setTimeout(r, config.confirm_retry_delay_ms));
-    rec = await probeModel(api, model);
-    if (rec.status === 'ok') {
-      console.log(`[probe] ✓ [${api.name}] ${model} 复测通过（第 ${attempt} 次成功）`);
-      return rec;
-    }
-  }
-  rec.error = `连续 ${total} 次失败 · ${rec.error || rec.status}`;
-  return rec;
-}
+// 探测失败的复核逻辑见 runProbe：首测失败的模型集中等待 confirm_retry_delay_ms 后
+// 批量复测（给号池轮换的时间），连续 1+confirm_retries 次都失败才记异常。
 
 // 追加记录并返回状态变化事件（down / up / null）
 function pushRecord(key, record) {
@@ -477,27 +461,51 @@ async function runProbe(scope = null) {
     }
   }
 
-  let index = 0;
-  let okCount = 0, failCount = 0;
-  const worker = async () => {
-    while (index < tasks.length) {
-      const { api, model, key } = tasks[index++];
-      if (!state.models[key]) continue; // 探测中该 API 被删除
-      const rec = await probeModelConfirmed(api, model);
-      if (!state.models[key]) continue;
-      const c = pushRecord(key, rec);
-      if (c) changes.push(c);
-      if (rec.status === 'ok') {
-        okCount++;
-        console.log(`[probe] ✓ [${api.name}] ${model} ${rec.latency_ms}ms`);
-      } else {
-        failCount++;
-        console.log(`[probe] ✗ [${api.name}] ${model} [${rec.status}${rec.http_status ? ' ' + rec.http_status : ''}] ${rec.error}`);
+  // 通用并发池：探测 list 里的任务，成功立即记录，失败的返回待复测列表
+  const probePass = async (list, label) => {
+    let i = 0;
+    const failed = [];
+    const worker = async () => {
+      while (i < list.length) {
+        const t = list[i++];
+        if (!state.models[t.key]) continue; // 探测中该 API 被删除
+        const rec = await probeModel(t.api, t.model);
+        if (!state.models[t.key]) continue;
+        if (rec.status === 'ok') {
+          okCount++;
+          const c = pushRecord(t.key, rec);
+          if (c) changes.push(c);
+          console.log(`[probe] ✓ [${t.api.name}] ${t.model} ${rec.latency_ms}ms${label ? `（${label}通过）` : ''}`);
+        } else {
+          failed.push({ ...t, rec });
+          console.log(`[probe] ? [${t.api.name}] ${t.model} ${label || '首测'}失败 [${rec.status}${rec.http_status ? ' ' + rec.http_status : ''}]，待复测确认`);
+        }
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
       }
-      await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(config.concurrency, list.length) }, worker));
+    return failed;
   };
-  await Promise.all(Array.from({ length: Math.min(config.concurrency, tasks.length) }, worker));
+
+  let okCount = 0, failCount = 0;
+  // 第一遍：全部模型
+  let pending = await probePass(tasks, '');
+  // 复测确认：失败的集中等待后批量重测（间隔期给号池轮换的时间），任一次成功即算正常
+  const totalTests = 1 + Math.max(0, config.confirm_retries);
+  for (let attempt = 2; attempt <= totalTests && pending.length; attempt++) {
+    console.log(`[probe] ${pending.length} 个模型待复测，${Math.round(config.confirm_retry_delay_ms / 1000)}s 后进行第 ${attempt}/${totalTests} 次测试`);
+    await new Promise(r => setTimeout(r, config.confirm_retry_delay_ms));
+    pending = await probePass(pending, `第 ${attempt} 次复测`);
+  }
+  // 复测后仍失败的才记异常
+  for (const t of pending) {
+    if (!state.models[t.key]) continue;
+    failCount++;
+    if (totalTests > 1) t.rec.error = `连续 ${totalTests} 次失败 · ${t.rec.error || t.rec.status}`;
+    const c = pushRecord(t.key, t.rec);
+    if (c) changes.push(c);
+    console.log(`[probe] ✗ [${t.api.name}] ${t.model} [${t.rec.status}${t.rec.http_status ? ' ' + t.rec.http_status : ''}] ${t.rec.error}`);
+  }
 
   state.lastProbeEnd = Date.now();
   if (isFull) state.nextProbeAt = Date.now() + config.interval_minutes * 60 * 1000;

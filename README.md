@@ -56,8 +56,8 @@ node server.js
   "concurrency": 3,                     // 并发数，太大易触发限流
   "max_tokens": 1,                      // 探测消耗，保持 1 即可
   "fallback_max_tokens": 4096,          // 思考类模型的重试值
-  "confirm_retries": 2,                 // 失败后快速复测次数，全失败才记异常
-  "confirm_retry_delay_ms": 5000,       // 复测间隔
+  "confirm_retries": 2,                 // 失败后复测次数（共 3 次测试），全失败才记异常
+  "confirm_retry_delay_ms": 30000,      // 复测间隔 30s，给号池轮换的时间
   "exclude_patterns": ["*tts*", "..."], // 跳过的模型（通配符 * ）
   "port": 8788,
   "host": "127.0.0.1"                   // 环境变量 HOST/PORT 可覆盖
