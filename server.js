@@ -402,7 +402,7 @@ function pushRecord(key, record) {
   return null;
 }
 
-// scope: null=全部；{apiName}=只探测该分组；{apiName, modelName}=只探测该分组下的单个模型
+// scope: null=全部；{apiName}=只探测该分组；{apiName, modelName}=单个模型；{apiName, models:[...]}=指定模型集合
 async function runProbe(scope = null) {
   if (state.probing) {
     state.probeQueue = state.probeQueue || [];
@@ -413,7 +413,10 @@ async function runProbe(scope = null) {
   state.probing = true;
   state.lastProbeStart = Date.now();
   const isFull = !scope || (!scope.apiName && !scope.modelName);
-  const scopeDesc = isFull ? '全部' : scope.modelName ? `[${scope.apiName}] ${scope.modelName}` : `[${scope.apiName}]`;
+  const scopeDesc = !scope ? '全部'
+    : scope.modelName ? `[${scope.apiName}] ${scope.modelName}`
+    : scope.models ? `[${scope.apiName}] ${scope.models.length} 个新模型`
+    : `[${scope.apiName}]`;
   console.log(`[probe] 开始探测 (${scopeDesc}) @ ${new Date().toLocaleString()}`);
   const changes = [];
   const apisSnapshot = config.apis.filter(a => !scope?.apiName || a.name === scope.apiName); // 探测中管理员改配置不影响本轮
@@ -427,6 +430,7 @@ async function runProbe(scope = null) {
       if (isFull) console.log(`[probe] [${api.name}] 发现 ${models.length} 个模型`);
       for (const m of models) {
         if (scope?.modelName && m !== scope.modelName) continue;
+        if (scope?.models && !scope.models.includes(m)) continue;
         const key = `${api.name}${SEP}${m}`;
         foundKeys.add(key);
         if (!state.models[key]) state.models[key] = { api: api.name, model: m, excluded: false, history: [] };
@@ -655,6 +659,51 @@ async function handleAdmin(req, res, url) {
         exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : null,
       })),
     });
+  }
+
+  // 重新拉取模型列表（?api=分组名，省略则全部分组），新增模型自动探测
+  if (req.method === 'POST' && url.pathname === '/api/admin/refresh-models') {
+    const apiName = url.searchParams.get('api') || '';
+    const targets = config.apis.filter(a => !apiName || a.name === apiName);
+    if (!targets.length) return json(res, 404, { error: apiName ? `找不到分组 "${apiName}"` : '没有已配置的 API' });
+    let total = 0, added = 0, removed = 0;
+    const errors = [];
+    for (const api of targets) {
+      try {
+        const models = await fetchModels(api);
+        total += models.length;
+        const newModels = [];
+        const found = new Set();
+        for (const m of models) {
+          const key = `${api.name}${SEP}${m}`;
+          found.add(key);
+          if (!state.models[key]) {
+            state.models[key] = { api: api.name, model: m, excluded: false, history: [] };
+            newModels.push(m);
+          }
+          const entry = state.models[key];
+          if (entry.present === false) { entry.present = true; if (!entry.history.length) newModels.push(m); }
+          else entry.present = true;
+          entry.excluded = api.exclude_patterns.some(p => matchPattern(m, p));
+        }
+        for (const [key, entry] of Object.entries(state.models)) {
+          if (entry.api === api.name && !found.has(key) && entry.present !== false) {
+            entry.present = false;
+            removed++;
+          }
+        }
+        const probeList = [...new Set(newModels)];
+        added += probeList.length;
+        console.log(`[admin] [${api.name}] 刷新模型列表: ${models.length} 个，新增 ${probeList.length}`);
+        const toProbe = probeList.filter(m => !state.models[`${api.name}${SEP}${m}`].excluded);
+        if (toProbe.length) runProbe({ apiName: api.name, models: toProbe }).catch(e => console.error(`[probe] 异常: ${e.message}`));
+      } catch (e) {
+        errors.push(`[${api.name}] ${String(e.message).slice(0, 150)}`);
+      }
+    }
+    saveHistory();
+    if (errors.length && !total) return json(res, 502, { error: errors.join('; ') });
+    return json(res, 200, { ok: true, total, added, removed, errors });
   }
 
   // 分组排序：body.order 为派生名称的新顺序

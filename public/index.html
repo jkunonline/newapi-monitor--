@@ -107,6 +107,7 @@
 
   <div class="toolbar">
     <input type="search" id="filter" placeholder="搜索模型名…">
+    <button id="refreshListBtn" class="ghost" style="display:none" onclick="refreshModelList()">刷新列表</button>
     <button id="probeBtn" style="display:none" onclick="triggerProbe(false)">立即探测</button>
     <button id="probeAllBtn" class="ghost" style="display:none" onclick="triggerProbe(true)">全部探测</button>
   </div>
@@ -318,11 +319,13 @@ async function refresh() {
 // 探测按钮：仅管理员可见；「立即探测」按当前分组/搜索词缩小范围，「全部探测」跑所有分组
 function updateProbeButtons() {
   const authed = data && data.authed;
-  const probeBtn = $('probeBtn'), allBtn = $('probeAllBtn');
+  const probeBtn = $('probeBtn'), allBtn = $('probeAllBtn'), refreshBtn = $('refreshListBtn');
   probeBtn.style.display = authed ? '' : 'none';
   allBtn.style.display = authed ? '' : 'none';
+  refreshBtn.style.display = authed ? '' : 'none';
   if (!authed) return;
   probeBtn.disabled = allBtn.disabled = data.probing;
+  refreshBtn.textContent = activeApi ? `刷新 ${activeApi} 列表` : '刷新全部列表';
   const q = $('filter').value.trim();
   let label = '探测当前';
   if (activeApi && q) label = `探测 ${activeApi} 匹配项`;
@@ -332,6 +335,38 @@ function updateProbeButtons() {
   allBtn.textContent = data.probing ? '探测中…' : '全部探测';
   // 没选分组时「立即探测」等同全部，隐藏冗余按钮
   allBtn.style.display = authed && activeApi ? '' : 'none';
+}
+
+async function refreshModelList() {
+  const btn = $('refreshListBtn');
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '刷新中…';
+  try {
+    const qs = activeApi ? '?api=' + encodeURIComponent(activeApi) : '';
+    const res = await fetch('/api/admin/refresh-models' + qs, { method: 'POST' });
+    if (res.status === 401) { toast('请先登录管理员'); show('loginOverlay'); return; }
+    const body = await res.json();
+    if (!res.ok) { toast(body.error || '刷新失败'); return; }
+    let msg = `列表已刷新：共 ${body.total} 个模型`;
+    if (body.added) msg += `，新增 ${body.added} 个（正在探测）`;
+    if (body.removed) msg += `，下线 ${body.removed} 个`;
+    if (body.errors && body.errors.length) msg += `；部分失败: ${body.errors.join('; ')}`;
+    toast(msg);
+    await refresh();
+    if (body.added) {
+      let ticks = 0;
+      const timer = setInterval(async () => {
+        await refresh();
+        if (++ticks > 20 || (data && !data.probing)) clearInterval(timer);
+      }, 3000);
+    }
+  } catch (e) {
+    toast('请求失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
 }
 
 async function triggerProbe(all) {
