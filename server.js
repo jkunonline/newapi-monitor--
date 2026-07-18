@@ -43,6 +43,7 @@ function normalizeBaseUrl(u) {
 function deriveApis(rawApis, globalExclude) {
   const apis = (Array.isArray(rawApis) ? rawApis : [])
     .map((a, i) => ({
+      rawIndex: i, // 在 rawConfig.apis 中的真实下标——管理接口必须用它定位，派生数组会过滤无效条目导致索引错位
       name: a.name || (() => { try { return new URL(normalizeBaseUrl(a.base_url)).hostname; } catch { return `api${i + 1}`; } })(),
       base_url: normalizeBaseUrl(a.base_url),
       api_key: a.api_key,
@@ -653,15 +654,17 @@ async function handleAdmin(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/admin/apis') {
     ensureRawApis();
     const derived = deriveApis(rawConfig.apis, config.exclude_patterns);
-    // 全部条目有效时索引一一对应，可展示派生名（含自动命名/去重后的结果）
-    const aligned = derived.length === rawConfig.apis.length;
     return json(res, 200, {
-      apis: rawConfig.apis.map((a, i) => ({
-        name: aligned ? derived[i].name : (a.name || ''),
-        base_url: a.base_url || '',
-        api_key_masked: maskKey(a.api_key),
-        exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : null,
-      })),
+      apis: rawConfig.apis.map((a, i) => {
+        const d = derived.find(x => x.rawIndex === i);
+        return {
+          name: d ? d.name : (a.name || '(无效条目)'),
+          base_url: a.base_url || '',
+          api_key_masked: maskKey(a.api_key),
+          exclude_patterns: Array.isArray(a.exclude_patterns) ? a.exclude_patterns : null,
+          invalid: !d,
+        };
+      }),
     });
   }
 
@@ -724,7 +727,7 @@ async function handleAdmin(req, res, url) {
         !body.order.every(n => derived.some(a => a.name === n))) {
       return json(res, 400, { error: 'order 与现有分组不匹配，请刷新后重试' });
     }
-    rawConfig.apis = body.order.map(n => rawConfig.apis[derived.findIndex(a => a.name === n)]);
+    rawConfig.apis = body.order.map(n => rawConfig.apis[derived.find(a => a.name === n).rawIndex]);
     try {
       saveConfig();
       config.apis = deriveApis(rawConfig.apis, config.exclude_patterns);
@@ -773,10 +776,12 @@ async function handleAdmin(req, res, url) {
   if (apiPathMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const target = decodeURIComponent(apiPathMatch[1]);
     ensureRawApis();
-    // 用派生后的名称定位原始条目（原始条目 name 可能为空）
+    // 用派生名称定位，再通过 rawIndex 回到原始条目——派生数组会过滤无效条目，
+    // 直接用派生下标索引 rawConfig.apis 会错位（曾导致编辑改到别的分组）
     const derived = deriveApis(rawConfig.apis, config.exclude_patterns);
-    const idx = derived.findIndex(a => a.name === target);
-    if (idx < 0) return json(res, 404, { error: `找不到 API "${target}"` });
+    const hit = derived.find(a => a.name === target);
+    if (!hit) return json(res, 404, { error: `找不到 API "${target}"` });
+    const idx = hit.rawIndex;
 
     if (req.method === 'DELETE') {
       rawConfig.apis.splice(idx, 1);
@@ -805,7 +810,7 @@ async function handleAdmin(req, res, url) {
     }
     if (body.name !== undefined && String(body.name).trim() && String(body.name).trim() !== target) {
       const newName = String(body.name).trim();
-      if (rawConfig.apis.some((a, i) => i !== idx && a.name === newName)) return json(res, 400, { error: `名称 "${newName}" 已存在` });
+      if (derived.some(a => a.rawIndex !== idx && a.name === newName)) return json(res, 400, { error: `名称 "${newName}" 已存在` });
       item.name = newName;
       // 迁移历史记录 key
       for (const [key, entry] of Object.entries(state.models)) {

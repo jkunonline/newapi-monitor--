@@ -76,15 +76,17 @@
   .formerr { color: var(--err); font-size: 12px; min-height: 16px; }
 
   /* 管理面板 */
-  .admin-item { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .admin-item { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-bottom: 1px solid var(--border); border-radius: 8px; transition: background .12s; }
   .admin-item:last-child { border-bottom: 0; }
   .admin-item .info { flex: 1; min-width: 0; }
   .admin-item .info .n { font-weight: 600; }
   .admin-item .info .u { color: var(--muted); font-size: 12px; word-break: break-all; }
   .admin-item button { padding: 5px 12px; font-size: 12px; }
-  .admin-item .arrows { display: flex; flex-direction: column; gap: 2px; }
-  .admin-item .arrows button { padding: 0 6px; font-size: 11px; line-height: 16px; }
-  .admin-item .arrows button:disabled { opacity: .25; }
+  .admin-item .grip { color: var(--muted); cursor: grab; font-size: 15px; padding: 4px 6px; user-select: none; touch-action: none; }
+  .admin-item .grip:active { cursor: grabbing; }
+  .admin-item.dragging { opacity: .4; background: #14263f; }
+  .admin-item.dropTarget { box-shadow: 0 -2px 0 0 var(--accent) inset; }
+  .admin-item.dropTarget.above { box-shadow: 0 2px 0 0 var(--accent); }
 
   #tooltip { position: fixed; background: #000c; color: #fff; font-size: 12px; padding: 6px 10px; border-radius: 6px; pointer-events: none; display: none; max-width: 320px; z-index: 30; word-break: break-all; }
   #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #000c; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 13px; display: none; z-index: 40; }
@@ -441,33 +443,66 @@ async function loadAdminList() {
     if (!body.apis.length) { adminApiNames = []; el.innerHTML = '<div class="empty" style="padding:16px 0">还没有 API</div>'; return; }
     adminApiNames = body.apis.map(a => a.name);
     el.innerHTML = body.apis.map((a, i) => `
-      <div class="admin-item">
-        <div class="arrows">
-          <button class="ghost" ${i === 0 ? 'disabled' : ''} onclick="moveApi(${i}, -1)" title="上移">▲</button>
-          <button class="ghost" ${i === body.apis.length - 1 ? 'disabled' : ''} onclick="moveApi(${i}, 1)" title="下移">▼</button>
-        </div>
+      <div class="admin-item" data-idx="${i}" draggable="true">
+        <span class="grip" title="拖动排序">⠿</span>
         <div class="info">
-          <div class="n">${escapeHtml(a.name || '(自动命名)')}</div>
+          <div class="n">${escapeHtml(a.name)}${a.invalid ? ' ⚠️' : ''}</div>
           <div class="u">${escapeHtml(a.base_url)} · ${escapeHtml(a.api_key_masked)}</div>
         </div>
-        <button class="ghost" onclick="editApi('${escapeHtml(a.name)}', '${escapeHtml(a.base_url)}')">编辑</button>
-        <button class="danger" onclick="delApi('${escapeHtml(a.name)}')">删除</button>
+        <button class="ghost" ${a.invalid ? 'disabled' : ''} onclick="editApi('${escapeHtml(a.name)}', '${escapeHtml(a.base_url)}')">编辑</button>
+        <button class="danger" ${a.invalid ? 'disabled' : ''} onclick="delApi('${escapeHtml(a.name)}')">删除</button>
       </div>`).join('');
+    bindDragSort(el);
   } catch (e) {
     el.innerHTML = `<div class="formerr">加载失败: ${escapeHtml(e.message)}</div>`;
   }
 }
 
-async function moveApi(index, dir) {
-  const order = [...adminApiNames];
-  const j = index + dir;
-  if (j < 0 || j >= order.length) return;
-  [order[index], order[j]] = [order[j], order[index]];
+// 拖拽排序：拖动条目到目标位置，松手即提交新顺序
+function bindDragSort(el) {
+  let dragIdx = null;
+  el.querySelectorAll('.admin-item').forEach(item => {
+    item.addEventListener('dragstart', e => {
+      dragIdx = +item.dataset.idx;
+      item.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(dragIdx)); } catch {}
+    });
+    item.addEventListener('dragend', () => {
+      dragIdx = null;
+      el.querySelectorAll('.admin-item').forEach(x => x.classList.remove('dragging', 'dropTarget', 'above'));
+    });
+    item.addEventListener('dragover', e => {
+      if (dragIdx === null) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const overIdx = +item.dataset.idx;
+      el.querySelectorAll('.admin-item').forEach(x => x.classList.remove('dropTarget', 'above'));
+      if (overIdx === dragIdx) return;
+      item.classList.add('dropTarget');
+      if (overIdx < dragIdx) item.classList.add('above');
+    });
+    item.addEventListener('drop', async e => {
+      e.preventDefault();
+      if (dragIdx === null) return;
+      const to = +item.dataset.idx;
+      const from = dragIdx;
+      dragIdx = null;
+      if (from === to) return;
+      const order = [...adminApiNames];
+      const [moved] = order.splice(from, 1);
+      order.splice(to, 0, moved);
+      await submitOrder(order);
+    });
+  });
+}
+
+async function submitOrder(order) {
   const res = await fetch('/api/admin/apis/reorder', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ order }),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) { toast(body.error || '排序失败'); return; }
+  if (!res.ok) { toast(body.error || '排序失败'); await loadAdminList(); return; }
   await loadAdminList();
   refresh(); // 标签页与模型列表立即按新顺序显示
 }
