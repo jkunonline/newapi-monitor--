@@ -457,6 +457,7 @@ async function loadAdminList() {
           <div class="n">${escapeHtml(a.name)}${a.invalid ? ' ⚠️' : ''}</div>
           <div class="u">${escapeHtml(a.base_url)} · ${escapeHtml(a.api_key_masked)}</div>
         </div>
+        <button class="ghost" ${a.invalid ? 'disabled' : ''} onclick="dupApi('${escapeHtml(a.name)}')">复制</button>
         <button class="ghost" ${a.invalid ? 'disabled' : ''} onclick="editApi('${escapeHtml(a.name)}', '${escapeHtml(a.base_url)}')">编辑</button>
         <button class="danger" ${a.invalid ? 'disabled' : ''} onclick="delApi('${escapeHtml(a.name)}')">删除</button>
       </div>`).join('');
@@ -583,6 +584,17 @@ async function saveApi() {
     btn.disabled = false;
     btn.textContent = editingName ? '保存' : '添加';
   }
+}
+
+// 复制分组：后端复制条目（名字自动加 _copy），随后直接打开编辑弹窗方便改密钥
+async function dupApi(name) {
+  const res = await fetch('/api/admin/apis/' + encodeURIComponent(name) + '/duplicate', { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) { toast(body.error || '复制失败'); return; }
+  toast(`已复制为 ${body.name}`);
+  await loadAdminList();
+  refresh();
+  editApi(body.name, body.base_url);
 }
 
 async function delApi(name) {

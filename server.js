@@ -772,6 +772,28 @@ async function handleAdmin(req, res, url) {
     return json(res, 200, { ok: true, model_count: modelCount });
   }
 
+  // 复制分组：新名字自动加 _copy（重名则 _copy2…），密钥等配置原样带过去
+  const dupMatch = url.pathname.match(/^\/api\/admin\/apis\/(.+)\/duplicate$/);
+  if (dupMatch && req.method === 'POST') {
+    const target = decodeURIComponent(dupMatch[1]);
+    ensureRawApis();
+    const derived = deriveApis(rawConfig.apis, config.exclude_patterns);
+    const hit = derived.find(a => a.name === target);
+    if (!hit) return json(res, 404, { error: `找不到 API "${target}"` });
+    const src = rawConfig.apis[hit.rawIndex];
+    let newName = `${target}_copy`, k = 2;
+    while (derived.some(a => a.name === newName)) newName = `${target}_copy${k++}`;
+    rawConfig.apis.push({ ...src, name: newName });
+    try {
+      applyApisChange();
+    } catch (e) {
+      rawConfig.apis.pop();
+      return json(res, 500, { error: `配置保存失败：${String(e.message).slice(0, 200)}` });
+    }
+    console.log(`[admin] 复制 API: ${target} → ${newName}`);
+    return json(res, 200, { ok: true, name: newName, base_url: src.base_url });
+  }
+
   const apiPathMatch = url.pathname.match(/^\/api\/admin\/apis\/(.+)$/);
   if (apiPathMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
     const target = decodeURIComponent(apiPathMatch[1]);
